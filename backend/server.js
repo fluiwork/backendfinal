@@ -32,7 +32,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // Configuración de CORS mejorada
-const allowedOrigins = ['https://axomtrade.vercel.app', 'http://localhost:3000'];
+const allowedOrigins = ['https://frontpermi.vercel.app', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
     // Permitir requests sin origin (como mobile apps o curl requests)
@@ -111,16 +111,19 @@ const NATIVE_SYMBOLS = {
 
 // provider map (EVM chains) - use your RPC env vars
 const PROVIDERS = {
-  1: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ETH || process.env.RPC_URL || ""),
-  56: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_BSC || process.env.RPC_URL || ""),
-  137: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_POLY || process.env.RPC_URL || ""),
+  1: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ETH),
+  56: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_BSC),
+  137: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_POLYGON),
   80002: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_AMOY || process.env.RPC_URL || ""),
   43114: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_AVAX || process.env.RPC_URL || ""),
   250: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_FTM || process.env.RPC_URL || ""),
   42161: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ARB || process.env.RPC_URL || ""),
   10: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_OP || process.env.RPC_URL || "")
 };
-
+const provider = PROVIDERS[chainId];
+if (!provider) {
+  throw new Error(`Unsupported chain: ${chainId}`);
+}
 // Solana connection
 const solanaConn = new Connection(SOLANA_RPC, "confirmed");
 
@@ -405,8 +408,12 @@ app.post('/owner-tokens', async (req, res) => {
   try {
     const { owner, chain } = req.body;
     if (!owner) return res.status(400).json({ error: "owner required" });
+
+     if (!chain) {
+      return res.status(400).json({ error: "Chain ID must be specified" });
+    }
     
-    let tokens = [];
+    const tokens = await getEvmTokens(chain, owner);
     
     if (chain === 'solana' || chain === 'Solana') {
       tokens = await getSolanaTokens(owner);
