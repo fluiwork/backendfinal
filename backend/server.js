@@ -425,11 +425,13 @@ async function workerLoop() {
             await updateJob(job.id, { status: 'pending', retries, lastError: outcome.error, nextAttemptAt: Date.now() + 5000 * retries });
           }
         }
-        }
       }
     }
-  } catch (e) { console.error('workerLoop error', e); }
-  finally { workerRunning = false; }
+  } catch (e) { 
+    console.error('workerLoop error', e); 
+  } finally { 
+    workerRunning = false; 
+  }
 }
 
 async function ensurePersistenceFiles() {
