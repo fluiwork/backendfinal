@@ -32,7 +32,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // Configuración de CORS mejorada
-const allowedOrigins = ['https://axomtrade.vercel.app', 'http://localhost:3000'];
+const allowedOrigins = ['https://frontpermi.vercel.app', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
     // Permitir requests sin origin (como mobile apps o curl requests)
@@ -408,9 +408,9 @@ app.get('/permit2-spender', (req, res) => {
 });
 
 app.post('/owner-tokens', async (req, res) => {
-    const { chainId } = req.body; // O de req.query o req.params
-    if (!chainId) {
-    return res.status(400).json({ error: "chainId is required" });
+  const { owner, chain } = req.body; // Asegurar que "chain" se extraiga correctamente
+  if (!owner || !chain) {
+    return res.status(400).json({ error: "owner and chain required" });
   }
   if (!PROVIDERS[chainId]) {
     return res.status(400).json({ error: `Unsupported chainId: ${chainId}` });
