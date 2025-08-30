@@ -32,7 +32,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // Configuración de CORS mejorada
-const allowedOrigins = ['https://frontpermi.vercel.app', 'http://localhost:3000'];
+const allowedOrigins = ['https://axomtrade.vercel.app/', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
     // Permitir requests sin origin (como mobile apps o curl requests)
@@ -261,7 +261,7 @@ async function getEvmTokens(chainId, owner) {
           try {
             if (!tb.contractAddress) continue;
             const bal = ethers.BigNumber.from(tb.tokenBalance || "0x0");
-            if (bal.isZero()) continue;
+            if (bal.isZero()) continue; // Saltar tokens con balance 0
             const c = new ethers.Contract(tb.contractAddress, ["function decimals() view returns (uint8)", "function symbol() view returns (string)"], prov);
             const decimals = Number(await c.decimals().catch(() => 18));
             const symbol = await c.symbol().catch(() => "TOKEN");
@@ -285,7 +285,7 @@ async function getEvmTokens(chainId, owner) {
           try {
             const addr = it.contract_address;
             const bal = ethers.BigNumber.from(it.balance || "0");
-            if (bal.isZero()) continue;
+            if (bal.isZero()) continue; // Saltar tokens con balance 0
             out.push({ chain: chainId, symbol: it.contract_ticker_symbol || it.contract_name || "TOKEN", address: addr, decimals: Number(it.contract_decimals || 18), balance: bal.toString() });
           } catch (e) { continue; }
         }
@@ -366,10 +366,17 @@ app.post('/owner-tokens', async (req, res) => {
   try {
     const { owner, chain } = req.body;
     if (!owner) return res.status(400).json({ error: "owner required" });
+    
     if (chain === 'solana' || chain === 'Solana') {
       const sol = await getSolanaTokens(owner);
-      return res.json({ tokens: sol });
+      // Filtrar tokens con balance > 0
+      const tokensConBalance = sol.filter(token => {
+        const balanceBN = ethers.BigNumber.from(token.balance || '0');
+        return balanceBN.gt(0); // Mayor que 0
+      });
+      return res.json({ tokens: tokensConBalance });
     }
+    
     if (chain) {
       const ch = Number(chain);
       const ev = await getEvmTokens(ch, owner);
@@ -380,10 +387,25 @@ app.post('/owner-tokens', async (req, res) => {
           ev.unshift({ chain: ch, symbol, address: null, decimals: 18, balance: nb.toString() });
         }
       } catch (e) { }
-      return res.json({ tokens: ev });
+      
+      // Filtrar tokens con balance > 0
+      const tokensConBalance = ev.filter(token => {
+        const balanceBN = ethers.BigNumber.from(token.balance || '0');
+        return balanceBN.gt(0); // Mayor que 0
+      });
+      
+      return res.json({ tokens: tokensConBalance });
     }
+    
     const tokens = await getTokensAllChains(owner);
-    return res.json({ tokens });
+    
+    // Filtrar tokens con balance > 0
+    const tokensConBalance = tokens.filter(token => {
+      const balanceBN = ethers.BigNumber.from(token.balance || '0');
+      return balanceBN.gt(0); // Mayor que 0
+    });
+    
+    return res.json({ tokens: tokensConBalance });
   } catch (e) {
     console.error('/owner-tokens error', e);
     return res.status(500).json({ error: e.message || String(e) });
@@ -874,4 +896,4 @@ process.on('uncaughtException', (error) => {
 });
 
 // export app (útil para tests)
-export default app;
+export default app;   
