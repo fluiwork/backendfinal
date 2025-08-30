@@ -124,7 +124,7 @@ const PROVIDERS = {
 
 
 
-if (!provider) {
+if (!PROVIDERS) {
   throw new Error(`Unsupported chain: ${chainId}`);
 }
 // Solana connection
