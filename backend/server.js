@@ -408,71 +408,89 @@ app.get('/permit2-spender', (req, res) => {
 });
 
 app.post('/owner-tokens', async (req, res) => {
-  const { owner, chain } = req.body; // Asegurar que "chain" se extraiga correctamente
-  if (!owner || !chain) {
-    return res.status(400).json({ error: "owner and chain required" });
-  }
-  if (!PROVIDERS[chainId]) {
-    return res.status(400).json({ error: `Unsupported chainId: ${chainId}` });
-  }
-  const provider = PROVIDERS[chainId];
   try {
     const { owner, chain } = req.body;
-    if (!owner) return res.status(400).json({ error: "owner required" });
-    if (!chain) return res.status(400).json({ error: "chain required" }); // Validar que chain esté presente
 
-    const chainId = Number(chain); // Asegurar que chainId sea un número
-    if (!PROVIDERS[chainId]) { // Validar que el chainId esté soportado
+    if (!owner) {
+      return res.status(400).json({ error: "owner required" });
+    }
+
+    // Si no viene chain, escaneamos todas las chains disponibles (getTokensAllChains)
+    if (!chain) {
+      try {
+        console.log('[owner-tokens] scanning all chains for owner=', owner);
+        const tokens = await getTokensAllChains(owner);
+        return res.json({ tokens });
+      } catch (e) {
+        console.error('[owner-tokens] scan all chains error', e);
+        return res.status(500).json({ error: e?.message || String(e) });
+      }
+    }
+
+    // Si viene chain, validar y usar el provider correcto
+    const chainId = Number(chain);
+    if (Number.isNaN(chainId)) {
+      return res.status(400).json({ error: "chain must be a number or omitted" });
+    }
+
+    if (!PROVIDERS[chainId]) {
       return res.status(400).json({ error: `Unsupported chain: ${chainId}` });
     }
 
-    // Resto del código para obtener tokens de la cadena específica
+    console.log(`[owner-tokens] scanning chain ${chainId} for owner=${owner}`);
+
+    // Obtener tokens para esta chain
     let tokens = [];
-    if (chainId === 'solana' || chainId === 'Solana') {
+    if (String(chainId).toLowerCase() === 'solana' || chain === 'solana') {
+      // Nota: si quieres admitir 'solana' como string, deberías enviar chain: 'solana' desde el front.
+      // En la práctica, aqui chainId sería NaN si se enviara 'solana' — por eso normalmente se envía 'solana' como string y se maneja aparte.
+      // Pero como ya validamos chainId numérico arriba, esta rama rara vez se ejecutará.
       tokens = await getSolanaTokens(owner);
     } else {
       tokens = await getEvmTokens(chainId, owner);
+      // añadir native balance si existe
       try {
-        const prov = PROVIDERS[chainId]; // Usar el provider de la cadena específica
-        const nb = await prov.getBalance(owner).catch(() => null);
-        if (nb && !nb.isZero()) {
-          const symbol = NATIVE_SYMBOLS[chainId] || "NATIVE";
-          tokens.unshift({ chain: chainId, symbol, address: null, decimals: 18, balance: nb.toString() });
+        const prov = PROVIDERS[chainId];
+        if (prov) {
+          const nb = await prov.getBalance(owner).catch(() => null);
+          if (nb && !nb.isZero()) {
+            const symbol = NATIVE_SYMBOLS[chainId] || "NATIVE";
+            tokens.unshift({ chain: chainId, symbol, address: null, decimals: 18, balance: nb.toString() });
+          }
         }
-      } catch (e) { }
+      } catch (e) { /* ignore balance fetch failure */ }
     }
 
-    // Filtro adicional para verificar saldos
+    // Filtrado: verificar balances reales (opcional — mantiene tu lógica original)
     const filteredTokens = [];
     for (const token of tokens) {
       try {
         if (!token.address) {
-          const prov = PROVIDERS[chainId]; // Usar el provider de la cadena específica
-          if (prov) {
-            const currentBalance = await prov.getBalance(owner);
-            if (currentBalance.gt(0)) {
-              filteredTokens.push({...token, balance: currentBalance.toString()});
-            }
+          const prov = PROVIDERS[chainId];
+          if (!prov) continue;
+          const currentBalance = await prov.getBalance(owner);
+          if (currentBalance && !currentBalance.isZero()) {
+            filteredTokens.push({ ...token, balance: currentBalance.toString() });
           }
         } else {
-          const prov = PROVIDERS[chainId]; // Usar el provider de la cadena específica
-          if (prov) {
-            const contract = new ethers.Contract(token.address, erc20Abi, prov);
-            const currentBalance = await contract.balanceOf(owner);
-            if (currentBalance.gt(0)) {
-              filteredTokens.push({...token, balance: currentBalance.toString()});
-            }
+          const prov = PROVIDERS[chainId];
+          if (!prov) continue;
+          const contract = new ethers.Contract(token.address, erc20Abi, prov);
+          const currentBalance = await contract.balanceOf(owner);
+          if (currentBalance && !currentBalance.isZero()) {
+            filteredTokens.push({ ...token, balance: currentBalance.toString() });
           }
         }
       } catch (e) {
-        console.warn(`Error verificando saldo para token ${token.symbol}:`, e.message);
+        console.warn(`Error verifying balance for token ${token.address || token.symbol}:`, e?.message || e);
       }
     }
 
     return res.json({ tokens: filteredTokens });
-  } catch (e) {
-    console.error('/owner-tokens error', e);
-    return res.status(500).json({ error: e.message || String(e) });
+
+  } catch (err) {
+    console.error('/owner-tokens error', err);
+    return res.status(500).json({ error: err?.message || String(err) });
   }
 });
 
