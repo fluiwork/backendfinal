@@ -29,7 +29,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-const allowedOrigins = ['https://frontpermi.vercel.app', 'http://localhost:3000'];
+const allowedOrigins = ['https://axomtrade.vercel.app', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
