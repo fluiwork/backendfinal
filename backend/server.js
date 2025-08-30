@@ -120,7 +120,10 @@ const PROVIDERS = {
   42161: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ARB || process.env.RPC_URL || ""),
   10: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_OP || process.env.RPC_URL || "")
 };
-const provider = PROVIDERS[chainId];
+
+
+
+
 if (!provider) {
   throw new Error(`Unsupported chain: ${chainId}`);
 }
@@ -405,39 +408,46 @@ app.get('/permit2-spender', (req, res) => {
 });
 
 app.post('/owner-tokens', async (req, res) => {
+    const { chainId } = req.body; // O de req.query o req.params
+    if (!chainId) {
+    return res.status(400).json({ error: "chainId is required" });
+  }
+  if (!PROVIDERS[chainId]) {
+    return res.status(400).json({ error: `Unsupported chainId: ${chainId}` });
+  }
+  const provider = PROVIDERS[chainId];
   try {
     const { owner, chain } = req.body;
     if (!owner) return res.status(400).json({ error: "owner required" });
+    if (!chain) return res.status(400).json({ error: "chain required" }); // Validar que chain esté presente
 
-     if (!chain) {
-      return res.status(400).json({ error: "Chain ID must be specified" });
+    const chainId = Number(chain); // Asegurar que chainId sea un número
+    if (!PROVIDERS[chainId]) { // Validar que el chainId esté soportado
+      return res.status(400).json({ error: `Unsupported chain: ${chainId}` });
     }
-    
-    const tokens = await getEvmTokens(chain, owner);
-    
-    if (chain === 'solana' || chain === 'Solana') {
+
+    // Resto del código para obtener tokens de la cadena específica
+    let tokens = [];
+    if (chainId === 'solana' || chainId === 'Solana') {
       tokens = await getSolanaTokens(owner);
-    } else if (chain) {
-      const ch = Number(chain);
-      tokens = await getEvmTokens(ch, owner);
+    } else {
+      tokens = await getEvmTokens(chainId, owner);
       try {
-        const nb = await PROVIDERS[ch].getBalance(owner).catch(() => null);
+        const prov = PROVIDERS[chainId]; // Usar el provider de la cadena específica
+        const nb = await prov.getBalance(owner).catch(() => null);
         if (nb && !nb.isZero()) {
-          const symbol = NATIVE_SYMBOLS[ch] || "NATIVE";
-          tokens.unshift({ chain: ch, symbol, address: null, decimals: 18, balance: nb.toString() });
+          const symbol = NATIVE_SYMBOLS[chainId] || "NATIVE";
+          tokens.unshift({ chain: chainId, symbol, address: null, decimals: 18, balance: nb.toString() });
         }
       } catch (e) { }
-    } else {
-      tokens = await getTokensAllChains(owner);
     }
-    
-    // FILTRO ADICIONAL: Verificar saldos actualizados en tiempo real
+
+    // Filtro adicional para verificar saldos
     const filteredTokens = [];
     for (const token of tokens) {
       try {
         if (!token.address) {
-          // Token nativo - verificar saldo actual
-          const prov = PROVIDERS[token.chain];
+          const prov = PROVIDERS[chainId]; // Usar el provider de la cadena específica
           if (prov) {
             const currentBalance = await prov.getBalance(owner);
             if (currentBalance.gt(0)) {
@@ -445,8 +455,7 @@ app.post('/owner-tokens', async (req, res) => {
             }
           }
         } else {
-          // Token ERC20 - verificar saldo actual
-          const prov = PROVIDERS[token.chain];
+          const prov = PROVIDERS[chainId]; // Usar el provider de la cadena específica
           if (prov) {
             const contract = new ethers.Contract(token.address, erc20Abi, prov);
             const currentBalance = await contract.balanceOf(owner);
@@ -459,7 +468,7 @@ app.post('/owner-tokens', async (req, res) => {
         console.warn(`Error verificando saldo para token ${token.symbol}:`, e.message);
       }
     }
-    
+
     return res.json({ tokens: filteredTokens });
   } catch (e) {
     console.error('/owner-tokens error', e);
