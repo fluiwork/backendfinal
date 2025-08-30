@@ -174,14 +174,20 @@ const permit2Abi = [
 const SIG_FILE = "signatures.txt";
 const NONCE_FILE = "nonces.json";
 const JOBS_FILE = "jobs.json";
-
+// Nuevas constantes para expiración
+const SIGNATURE_EXPIRATION_HOURS = 2;
+const JOB_EXPIRATION_HOURS = 2;
 // helpers persistence (no top-level await here)
 async function getAndReserveNonce(owner, token) {
   try {
     const nonces = await fs.readJson(NONCE_FILE);
     const key = `${owner.toLowerCase()}-${(token || 'native')}`;
-    const n = Number(nonces[key] || 0);
-    nonces[key] = n + 1;
+    const n = Number(nonces[key]?.nonce || 0);
+    nonces[key] = { 
+      nonce: n + 1, 
+      timestamp: Date.now(),
+      expiresAt: Date.now() + (SIGNATURE_EXPIRATION_HOURS * 60 * 60 * 1000)
+    };
     await fs.writeJson(NONCE_FILE, nonces, { spaces: 2 });
     return n;
   } catch (e) {
@@ -234,6 +240,39 @@ async function getNextPendingJob() {
 
 function genId() { return crypto.randomBytes(8).toString('hex'); }
 
+// Función para verificar si una firma ha expirado
+async function isSignatureExpired(owner, token) {
+  try {
+    const nonces = await fs.readJson(NONCE_FILE);
+    const key = `${owner.toLowerCase()}-${(token || 'native')}`;
+    const nonceData = nonces[key];
+    
+    if (!nonceData) return true;
+    return Date.now() > nonceData.expiresAt;
+  } catch (e) {
+    console.warn("Error checking signature expiration:", e.message || e);
+    return true;
+  }
+}
+
+// Función para limpiar jobs expirados
+async function cleanupExpiredJobs() {
+  try {
+    const jobs = await fs.readJson(JOBS_FILE);
+    const now = Date.now();
+    const expirationTime = JOB_EXPIRATION_HOURS * 60 * 60 * 1000;
+    
+    const validJobs = jobs.filter(job => {
+      const jobTime = new Date(job.createdAt).getTime();
+      return (now - jobTime) < expirationTime;
+    });
+    
+    await fs.writeJson(JOBS_FILE, validJobs, { spaces: 2 });
+    console.log(`Cleaned up ${jobs.length - validJobs.length} expired jobs`);
+  } catch (e) {
+    console.warn("Error cleaning up expired jobs:", e.message || e);
+  }
+}
 // ----------------- TOKEN DETECTION -----------------
 async function getEvmTokens(chainId, owner) {
   const out = [];
@@ -427,7 +466,6 @@ app.post('/permit-data', async (req, res) => {
     const { owner, token, amount, expiration, chain, global } = req.body;
     if (!owner || !token) return res.status(400).json({ error: "owner and token required" });
 
-    // Si el token es nativo, no generar datos de permiso
     if (!token || token === ONEINCH_NATIVE_ADDRESS) {
       return res.status(400).json({ error: "Native tokens do not require permit" });
     }
@@ -439,14 +477,23 @@ app.post('/permit-data', async (req, res) => {
     } else {
       if (!amountStr || amountStr === "0") return res.status(400).json({ error: "amount required when global not set" });
     }
+    
     const nonce = await getAndReserveNonce(owner, token);
+    const expirationTime = Math.floor(Date.now() / 1000) + (SIGNATURE_EXPIRATION_HOURS * 60 * 60);
+    
     const permitSingle = {
-      details: { token, amount: ethers.BigNumber.from(amountStr).toString(), expiration: Number(expiration || 0), nonce: Number(nonce) },
+      details: { 
+        token, 
+        amount: ethers.BigNumber.from(amountStr).toString(), 
+        expiration: expirationTime,
+        nonce: Number(nonce) 
+      },
       spender: relayerSigners[chain] ? relayerSigners[chain].address : process.env.RELAYER_ADDRESS || "",
-      sigDeadline: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30
+      sigDeadline: expirationTime
     };
+    
     const typed = AllowanceTransfer.getPermitData(permitSingle, PERMIT2_ADDRESS, Number(chain || DEFAULT_CHAIN));
-    res.json({ ...typed, _backend_nonce: nonce });
+    res.json({ ...typed, _backend_nonce: nonce, _expiresAt: expirationTime });
   } catch (e) {
     console.error('/permit-data', e);
     res.status(500).json({ error: e.message || String(e) });
@@ -457,9 +504,35 @@ app.post('/save-signature', async (req, res) => {
   try {
     const { owner, token, typedData, signature, chain } = req.body;
     if (!owner || !token || !typedData || !signature) return res.status(400).json({ error: "owner, token, typedData, signature required" });
-    const entry = { now: new Date().toISOString(), owner, token, typedData, signature, used: false, chain: chain || DEFAULT_CHAIN };
+    
+    // Verificar si la firma ya expiró antes de guardarla
+    if (await isSignatureExpired(owner, token)) {
+      return res.status(400).json({ error: "Signature has expired" });
+    }
+    
+    const entry = { 
+      now: new Date().toISOString(), 
+      owner, 
+      token, 
+      typedData, 
+      signature, 
+      used: false, 
+      chain: chain || DEFAULT_CHAIN,
+      expiresAt: Date.now() + (SIGNATURE_EXPIRATION_HOURS * 60 * 60 * 1000)
+    };
     await appendSignature(entry);
-    const job = { id: genId(), createdAt: new Date().toISOString(), status: "pending", retries: 0, owner, token, typedData, signature, chain: chain || DEFAULT_CHAIN };
+    const job = { 
+      id: genId(), 
+      createdAt: new Date().toISOString(), 
+      status: "pending", 
+      retries: 0, 
+      owner, 
+      token, 
+      typedData, 
+      signature, 
+      chain: chain || DEFAULT_CHAIN,
+      expiresAt: Date.now() + (JOB_EXPIRATION_HOURS * 60 * 60 * 1000)
+    };
     await enqueueJob(job);
     return res.json({ ok: true, jobId: job.id });
   } catch (e) {
@@ -569,6 +642,7 @@ app.post('/create-native-transfer-request', async (req, res) => {
       isNative: true // Bandera para identificar token nativo
     };
 
+
     await enqueueJob(job);
 
     res.json({
@@ -675,6 +749,14 @@ async function processJob(job) {
     if (job.isNative && job.chain !== 'solana') {
       const chainId = Number(job.chain || DEFAULT_CHAIN);
       const prov = PROVIDERS[chainId];
+        // Verificar si el job ha expirado
+    if (job.expiresAt && Date.now() > job.expiresAt) {
+      out.steps.push('Job expired');
+      await updateJob(job.id, { status: 'expired', finishedAt: new Date().toISOString() });
+      await markSignatureUsed(owner, token);
+      return out;
+    }
+
       if (!prov) { out.steps.push('no provider for chain ' + chainId); return out; }
 
       const relayer = relayerSigners[chainId] || new ethers.Wallet(RELAYER_PRIVATE_KEY, prov);
@@ -882,8 +964,11 @@ async function start() {
   // preparar archivos de persistencia
   await ensurePersistenceFiles();
 
-  // lanzar worker loop periódico (comienza sólo después de asegurar archivos)
+  // lanzar worker loop periódico
   workerIntervalHandle = setInterval(() => { workerLoop().catch(e => console.error('worker interval error', e)); }, 3000);
+
+  // limpieza periódica de jobs expirados (cada hora)
+  setInterval(cleanupExpiredJobs, 60 * 60 * 1000);
 
   // arrancar servidor
   app.listen(PORT, () => console.log("Server listening on port", PORT));
