@@ -32,7 +32,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // Configuración de CORS mejorada
-const allowedOrigins = ['https://backendfinal-yv8u.onrender.com', 'http://localhost:3000'];
+const allowedOrigins = ['https://axomtrade.vercel.app', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
     // Permitir requests sin origin (como mobile apps o curl requests)
